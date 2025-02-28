@@ -1,3 +1,4 @@
+***WORK IN PROGRESS***
 # Alpaca ML Crypto Stock Analysis
 
 This repository is a group project for CPE-595 that leverages the Alpaca API to fetch cryptocurrency/stock data and uses three different machine learning algorithms to analyze and predict market trends. The project includes data fetching, preprocessing, and training.
