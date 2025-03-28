@@ -28,6 +28,9 @@ BASE_URL = "https://paper-api.alpaca.markets"
 api_key = os.getenv("ALPACA_API_KEY")
 secret_key = os.getenv("ALPACA_SECRET_KEY")
 api = tradeapi.REST(key_id=api_key, secret_key=secret_key, base_url=BASE_URL, api_version='v2')
+if not api_key or not secret_key:
+    raise EnvironmentError("Missing ALPACA_API_KEY or ALPACA_SECRET_KEY in environment variables.")
+
 
 def account_details():
     # Initialize the TradingClient.
@@ -263,17 +266,17 @@ def check_missing_and_outliers(df):
     outliers = df[(df['close'] < Q1 - 1.5 * IQR) | (df['close'] > Q3 + 1.5 * IQR)]
     print(f"\nDetected {len(outliers)} potential outliers in closing prices.")
 
-def build_model_LSTM(input_shape):
+def build_model_LSTM(input_shape, units=50, dropout=0.2):
     regressor = Sequential()
-    regressor.add(Input(shape=input_shape))  # Use Input layer to define the input shape
-    regressor.add(LSTM(units=50, return_sequences=True))
-    regressor.add(Dropout(0.2))
-    regressor.add(LSTM(units=50, return_sequences=True))
-    regressor.add(Dropout(0.2))
-    regressor.add(LSTM(units=50, return_sequences=True))
-    regressor.add(Dropout(0.2))
-    regressor.add(LSTM(units=50))
-    regressor.add(Dropout(0.2))
+    regressor.add(Input(shape=input_shape))
+    regressor.add(LSTM(units, return_sequences=True))
+    regressor.add(Dropout(dropout))
+    regressor.add(LSTM(units, return_sequences=True))
+    regressor.add(Dropout(dropout))
+    regressor.add(LSTM(units, return_sequences=True))
+    regressor.add(Dropout(dropout))
+    regressor.add(LSTM(units))
+    regressor.add(Dropout(dropout))
     regressor.add(Dense(units=1))
     regressor.compile(optimizer='adam', loss='mean_squared_error')
     return regressor
@@ -330,63 +333,188 @@ def train_model_LSTM(data, model):
     return model, sc
 
 def predict_and_plot_LSTM(data, model, scaler):
-    full_data = pd.DataFrame(data)
-    real_prices = full_data.iloc[:, 0:1].values
+    df = pd.DataFrame(data)
+
+    # Flatten multi-index columns if necessary
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = ['_'.join(col).strip() for col in df.columns.values]
+
+    # Reset index so timestamp becomes a column
+    df = df.reset_index()
+
+    # Ensure timestamp column is datetime
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+    # Use only the 'close' price
+    real_prices = df[[col for col in df.columns if 'close' in col.lower()]].values
     scaled_data = scaler.transform(real_prices)
 
-    # Prepare inputs for prediction
+    # Create input sequences
     X_test = []
     for i in range(60, len(scaled_data)):
         X_test.append(scaled_data[i-60:i, 0])
     X_test = np.array(X_test)
     X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
 
-    # Predict
+    # Predict and inverse transform
     predicted_prices = model.predict(X_test)
     predicted_prices = scaler.inverse_transform(predicted_prices)
-
-    # True prices to compare
     true_prices = real_prices[60:]
+    timestamps = df['timestamp'].iloc[60:]
 
-    # Evaluation metrics
+    # Plot with datetime x-axis
+    # plt.figure(figsize=(14, 5))
+    plt.plot(timestamps, true_prices, color='red', label='Actual BTC Price')
+    plt.plot(timestamps, predicted_prices, color='blue', label='Predicted BTC Price')
+    plt.title('BTC Price Prediction')
+    plt.xlabel('Time')
+    plt.ylabel('BTC Price (USD)')
+    plt.xticks(rotation=45)
+    plt.legend()
+    plt.tight_layout()
+
+    # Metrics
     mae = mean_absolute_error(true_prices, predicted_prices)
     mse = mean_squared_error(true_prices, predicted_prices)
     rmse = np.sqrt(mse)
 
-    # Plot
-    plt.plot(true_prices, color='red', label='Actual BTC Price')
-    plt.plot(predicted_prices, color='blue', label='Predicted BTC Price')
-    plt.title('BTC Price Prediction using LSTM')
-    plt.xlabel('Time (hours)')
-    plt.ylabel('BTC Price')
-    plt.legend()
-
-    # Add metrics as text on the plot
     metrics_text = f'MAE: {mae:.2f}\nMSE: {mse:.2f}\nRMSE: {rmse:.2f}'
-    plt.gcf().text(0.5, 0.85, metrics_text,
-                   fontsize=10,
-                   ha='center',  # Center horizontally
-                   va='top',     # Align to top vertically
+    plt.gcf().text(0.5, 0.90, metrics_text, fontsize=10, ha='center', va='top',
                    bbox=dict(facecolor='white', edgecolor='black', alpha=0.8))
+
     plt.show()
 
-def run_LSTM():
-    btc_data = crypto_bars('BTC/USD', '2024-01-01', '2025-01-31', 1000, TimeFrame.Hour)
 
-    # Raw data inspection
-    describe_data(btc_data)
-    check_missing_and_outliers(btc_data)
+def run_LSTM_test():
+    # Load full BTC data from 2024-01-01 to current UTC time
+    start_date = "2024-01-01"
+    end_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    btc_data = crypto_bars('BTC/USD', start_date, end_date, None, TimeFrame.Hour)
 
-    # Train and evaluate LSTM model
+    # Prepare dataframe
+    df = btc_data.reset_index()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
+
+    describe_data(df)
+    check_missing_and_outliers(df)
+
+    # Chronological 80/20 split
+    total_len = len(df)
+    train_len = int(total_len * 0.8)
+
+    train_df = df.iloc[:train_len]
+    test_df = df.iloc[train_len - 60:]  # start 60 back so we can make test sequences
+
+    # Normalize
+    scaler = MinMaxScaler()
+    train_scaled = scaler.fit_transform(train_df['close'].values.reshape(-1, 1))
+    test_scaled = scaler.transform(test_df['close'].values.reshape(-1, 1))
+
+    # Create sequences
+    X_train, y_train = [], []
+    for i in range(60, len(train_scaled)):
+        X_train.append(train_scaled[i-60:i, 0])
+        y_train.append(train_scaled[i, 0])
+
+    X_test, y_test = [], []
+    for i in range(60, len(test_scaled)):
+        X_test.append(test_scaled[i-60:i, 0])
+        y_test.append(test_scaled[i, 0])
+
+    X_train = np.array(X_train).reshape(-1, 60, 1)
+    y_train = np.array(y_train)
+    X_test = np.array(X_test).reshape(-1, 60, 1)
+    y_test = np.array(y_test)
+
+    # Train model
     model = build_model_LSTM((60, 1))
-    trained_model, scaler = train_model_LSTM(btc_data, model)
-    predict_and_plot_LSTM(btc_data, trained_model, scaler)
+    early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=1)
+    history = model.fit(X_train, y_train, epochs=100, batch_size=32, validation_split=0.1, verbose=1, callbacks=[early_stop])
+
+    # Plot training history
+    plt.plot(history.history['loss'], label='Training Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.title('Loss Over Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss (MSE)')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    # Predict on test set
+    predicted_scaled = model.predict(X_test)
+    predicted = scaler.inverse_transform(predicted_scaled)
+    actual = scaler.inverse_transform(y_test.reshape(-1, 1))
+
+    # Plot
+    timestamps = test_df['timestamp'].iloc[60:]
+    # plt.figure(figsize=(14, 5))
+    plt.grid(True)
+    plt.plot(timestamps, actual, color='red', label='Actual BTC Price')
+    plt.plot(timestamps, predicted, color='blue', label='Predicted BTC Price')
+    plt.title('LSTM Prediction on Test Set (20%)')
+    plt.xlabel('Time')
+    plt.ylabel('BTC Price (USD)')
+    plt.xticks(rotation=45)
+    plt.legend()
+
+    # Metrics
+    mae = mean_absolute_error(actual, predicted)
+    rmse = np.sqrt(mean_squared_error(actual, predicted))
+    metrics_text = f'MAE: {mae:.2f}\nRMSE: {rmse:.2f}'
+    plt.gcf().text(0.5, 0.90, metrics_text, fontsize=10, ha='center', va='top',
+                   bbox=dict(facecolor='white', edgecolor='black', alpha=0.8))
+
+    plt.tight_layout()
+    plt.show()
+
+    return df, model, scaler
+
+def predict_next_lstm_price(df, model, scaler, steps_ahead=1):
+    """
+    Predict the next `steps_ahead` hourly BTC prices using the most recent 60-hour window.
+    """
+    recent_close = df['close'].values[-60:].reshape(-1, 1)
+    recent_scaled = scaler.transform(recent_close)
+
+    predictions = []
+    input_seq = recent_scaled.copy()
+
+    for _ in range(steps_ahead):
+        input_seq_reshaped = input_seq.reshape(1, 60, 1)
+        predicted_scaled = model.predict(input_seq_reshaped)
+        predicted_price = scaler.inverse_transform(predicted_scaled)[0][0]
+        predictions.append(predicted_price)
+
+        # Append to sequence and slide window
+        input_seq = np.append(input_seq[1:], predicted_scaled).reshape(60, 1)
+
+    last_timestamp = df['timestamp'].iloc[-1]
+    future_times = [last_timestamp + timedelta(hours=i + 1) for i in range(24)]
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(future_times, predictions, marker='o', label="Forecasted BTC Price", color='blue')
+    plt.title("24-Hour BTC Price Forecast (LSTM)")
+    plt.xlabel("Time")
+    plt.ylabel("Predicted BTC Price (USD)")
+    plt.xticks(rotation=45)
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    return predictions
+
 
 def main():
 
     # run_test.run_test()
 
-    run_LSTM()
+    df, model, scaler = run_LSTM_test()
+    future_prices = predict_next_lstm_price(df, model, scaler, steps_ahead=24)
+
     
 if __name__ == "__main__":
     main()
