@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from sklearn.preprocessing import MinMaxScaler
 from keras.models import Sequential
 from keras.layers import Dense, LSTM, Dropout, Input
+from keras.callbacks import EarlyStopping
 import alpaca_trade_api as tradeapi
 from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import (
@@ -262,7 +263,7 @@ def check_missing_and_outliers(df):
     outliers = df[(df['close'] < Q1 - 1.5 * IQR) | (df['close'] > Q3 + 1.5 * IQR)]
     print(f"\nDetected {len(outliers)} potential outliers in closing prices.")
 
-def build_model_LSMT(input_shape):
+def build_model_LSTM(input_shape):
     regressor = Sequential()
     regressor.add(Input(shape=input_shape))  # Use Input layer to define the input shape
     regressor.add(LSTM(units=50, return_sequences=True))
@@ -277,22 +278,17 @@ def build_model_LSMT(input_shape):
     regressor.compile(optimizer='adam', loss='mean_squared_error')
     return regressor
 
-# Followed tutorial code from <https://www.simplilearn.com/tutorials/machine-learning-tutorial/stock-price-prediction-using-machine-learning>
-def train_model_LSMT(data, model):
+# Modified code from <https://www.simplilearn.com/tutorials/machine-learning-tutorial/stock-price-prediction-using-machine-learning>
+def train_model_LSTM(data, model):
     dataset_train = pd.DataFrame(data)
-    
-    # Ensure there are enough rows for training
+
     if len(dataset_train) < 60:
         raise ValueError("Not enough data to train the model. At least 60 rows are required.")
-    
-    # Use the open stock price column to train the model
-    training_set = dataset_train.iloc[:, 0:1].values
 
-    # Normalize the data
+    training_set = dataset_train.iloc[:, 0:1].values
     sc = MinMaxScaler(feature_range=(0, 1))
     training_set_scaled = sc.fit_transform(training_set)
 
-    # Creating X_train and y_train
     X_train = []
     y_train = []
     for i in range(60, len(training_set)):
@@ -300,16 +296,40 @@ def train_model_LSMT(data, model):
         y_train.append(training_set_scaled[i, 0])
     X_train, y_train = np.array(X_train), np.array(y_train)
 
-    # Reshape the data
     X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
 
-    # Fit the model
-    model.fit(X_train, y_train, epochs=100, batch_size=32, verbose=1)
+    # Define early stopping
+    early_stop = EarlyStopping(
+        monitor='loss',
+        patience=10,
+        restore_best_weights=True,
+        verbose=1
+    )
 
-    # Return the scaler for later use
+    # Train the model and capture history
+    history = model.fit(
+        X_train,
+        y_train,
+        epochs=100,
+        batch_size=32,
+        verbose=1,
+        callbacks=[early_stop]
+    )
+
+    # Plot and save the training loss
+    plt.figure(figsize=(8, 4))
+    plt.plot(history.history['loss'], label='Training Loss')
+    plt.title('Training Loss over Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss (MSE)')
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
     return model, sc
 
-def predict_and_plot_LSMT(data, model, scaler):
+def predict_and_plot_LSTM(data, model, scaler):
     full_data = pd.DataFrame(data)
     real_prices = full_data.iloc[:, 0:1].values
     scaled_data = scaler.transform(real_prices)
@@ -334,7 +354,7 @@ def predict_and_plot_LSMT(data, model, scaler):
     rmse = np.sqrt(mse)
 
     # Plot
-    plt.figure(figsize=(14, 5))
+    #plt.figure(figsize=(14, 5))
     plt.plot(true_prices, color='red', label='Actual BTC Price')
     plt.plot(predicted_prices, color='blue', label='Predicted BTC Price')
     plt.title('BTC Price Prediction')
@@ -357,9 +377,9 @@ def run_LSTM():
     check_missing_and_outliers(btc_data)
 
     # Train and evaluate LSTM model
-    model = build_model_LSMT((60, 1))
-    trained_model, scaler = train_model_LSMT(btc_data, model)
-    predict_and_plot_LSMT(btc_data, trained_model, scaler)
+    model = build_model_LSTM((60, 1))
+    trained_model, scaler = train_model_LSTM(btc_data, model)
+    predict_and_plot_LSTM(btc_data, trained_model, scaler)
 
 def main():
 
