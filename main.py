@@ -354,19 +354,20 @@ def predict_and_plot_LSTM(data, model, scaler):
     rmse = np.sqrt(mse)
 
     # Plot
-    #plt.figure(figsize=(14, 5))
     plt.plot(true_prices, color='red', label='Actual BTC Price')
     plt.plot(predicted_prices, color='blue', label='Predicted BTC Price')
-    plt.title('BTC Price Prediction')
+    plt.title('BTC Price Prediction using LSTM')
     plt.xlabel('Time (hours)')
     plt.ylabel('BTC Price')
     plt.legend()
 
     # Add metrics as text on the plot
     metrics_text = f'MAE: {mae:.2f}\nMSE: {mse:.2f}\nRMSE: {rmse:.2f}'
-    plt.text(0.01, 0.95, metrics_text, transform=plt.gca().transAxes,
-             fontsize=10, verticalalignment='top', bbox=dict(facecolor='white', alpha=0.7))
-
+    plt.gcf().text(0.5, 0.85, metrics_text,
+                   fontsize=10,
+                   ha='center',  # Center horizontally
+                   va='top',     # Align to top vertically
+                   bbox=dict(facecolor='white', edgecolor='black', alpha=0.8))
     plt.show()
 
 def run_LSTM():
