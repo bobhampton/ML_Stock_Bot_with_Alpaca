@@ -42,7 +42,6 @@ api = tradeapi.REST(key_id=api_key, secret_key=secret_key, base_url=BASE_URL, ap
 if not api_key or not secret_key:
     raise EnvironmentError("Missing ALPACA_API_KEY or ALPACA_SECRET_KEY in environment variables.")
 
-
 def account_details():
     # Initialize the TradingClient.
     trading_client = TradingClient(
@@ -218,10 +217,10 @@ def make_crypto_order(symbol, qty, time_in_force):
         time_in_force=time_in_force
     )
 
-    if account.cash >= estimated_risk:
-        print(f"Estimated risk is within acceptable limits. Proceeding with order for {qty} of {symbol}.")
-    else:
-        print(f"Estimated risk exceeds acceptable limits. Cannot proceed with order for {qty} of {symbol}.")
+    # if account.cash >= estimated_risk:
+    #     print(f"Estimated risk is within acceptable limits. Proceeding with order for {qty} of {symbol}.")
+    # else:
+    #     print(f"Estimated risk exceeds acceptable limits. Cannot proceed with order for {qty} of {symbol}.")
     # Submit the order.
     order_submission_response = trading_client.submit_order(order_data=order_request)
     return order_submission_response
@@ -642,97 +641,7 @@ def simulate_trading(
         'equity_curve': equity_curve
     }
 
-
 def main():
-
-    # run_test.run_test()
-
-    # df, model, scaler = run_LSTM_test()
-    # future_prices = predict_next_LSTM_price(df, model, scaler, steps_ahead=24)
-
-
-    # # Run optuna tuning if needed
-    # best_params = optimize_lstm_hyperparameters()  # <- only once
-
-    # # Model training using best params
-    # df = crypto_bars('BTC/USD', "2024-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
-    # df = df.reset_index()
-    # df['timestamp'] = pd.to_datetime(df['timestamp'])
-    # df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
-    
-    # total_len = len(df)
-    # train_len = int(total_len * 0.8)
-    # train_df = df.iloc[:train_len]
-    # test_df = df.iloc[train_len - 60:]
-
-    # X_train, y_train, scaler = prepare_LSTM_training_data(train_df)
-    # X_test, y_test, _ = prepare_LSTM_training_data(test_df, scaler=scaler)
-
-    # model = build_model_LSTM((60, 1), **best_params)
-    # early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-    # history = model.fit(X_train, y_train, validation_split=0.1, epochs=best_params["epochs"], batch_size=best_params["batch_size"], callbacks=[early_stop])
-
-    # # Visuals and forecasting
-    # save_model(model)
-    # predict_next_LSTM_price(df, model, scaler, steps_ahead=24)
-
-
-
-
-    # Run Optuna once to find & save best params
-    # Uncomment to re-optimize:
-    # best_params = optimize_lstm_hyperparameters()
-    # save_best_params(best_params)
-
-    # Load best params
-    # best_params = load_best_params()
-
-    # df = crypto_bars('BTC/USD', "2024-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
-    # if df.empty:
-    #     print("Data fetch failed.")
-    #     return
-
-    # df = df.reset_index()
-    # df['timestamp'] = pd.to_datetime(df['timestamp'])
-    # df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
-
-    # total_len = len(df)
-    # train_len = int(total_len * 0.8)
-    # train_df = df.iloc[:train_len]
-    # test_df = df.iloc[train_len - 60:]
-
-    # X_train, y_train, scaler = prepare_LSTM_training_data(train_df)
-    # X_test, y_test, _ = prepare_LSTM_training_data(test_df, scaler=scaler)
-
-    # model = build_model_LSTM(
-    #     input_shape=(60, 1),
-    #     units=best_params["units"],
-    #     dropout=best_params["dropout"]
-    # )
-
-    # early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-    # history = model.fit(
-    #     X_train, y_train,
-    #     validation_split=0.1,
-    #     epochs=best_params["epochs"],
-    #     batch_size=best_params["batch_size"],
-    #     callbacks=[early_stop]
-    # )
-
-    # #save_model(model)
-
-    # predict_next_LSTM_price(
-    #     df=df,
-    #     model=model,
-    #     scaler=scaler,
-    #     steps_ahead=24,
-    #     symbol='BTC/USD',
-    #     qty=0.001,
-    #     buy_threshold=500,
-    #     sell_threshold=-500
-    # )
-
-
     # Load best Optuna params (optional if not using optimized)
     try:
         best_params = load_best_params()
