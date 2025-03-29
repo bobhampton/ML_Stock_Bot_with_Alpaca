@@ -1,9 +1,12 @@
 from datetime import datetime, timedelta, timezone
 import os
 import numpy as np
+import logging
 import pandas as pd
 import matplotlib.pyplot as plt
 import run_test
+import optuna
+import json
 from dotenv import load_dotenv
 from sklearn.preprocessing import MinMaxScaler
 from keras.models import Sequential, load_model
@@ -21,6 +24,14 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetAssetsRequest, OrderRequest
 from alpaca.trading.enums import AssetClass, OrderSide, OrderType, OrderClass, TimeInForce
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
+log = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -207,6 +218,10 @@ def make_crypto_order(symbol, qty, time_in_force):
         time_in_force=time_in_force
     )
 
+    if account.cash >= estimated_risk:
+        print(f"Estimated risk is within acceptable limits. Proceeding with order for {qty} of {symbol}.")
+    else:
+        print(f"Estimated risk exceeds acceptable limits. Cannot proceed with order for {qty} of {symbol}.")
     # Submit the order.
     order_submission_response = trading_client.submit_order(order_data=order_request)
     return order_submission_response
@@ -260,11 +275,527 @@ def check_missing_and_outliers(df):
     outliers = df[(df['close'] < Q1 - 1.5 * IQR) | (df['close'] > Q3 + 1.5 * IQR)]
     print(f"\nDetected {len(outliers)} potential outliers in closing prices.")
 
+def build_model_LSTM(input_shape, units=50, dropout=0.2):
+    regressor = Sequential()
+    regressor.add(Input(shape=input_shape))
+    regressor.add(LSTM(units, return_sequences=True))
+    regressor.add(Dropout(dropout))
+    regressor.add(LSTM(units, return_sequences=True))
+    regressor.add(Dropout(dropout))
+    regressor.add(LSTM(units, return_sequences=True))
+    regressor.add(Dropout(dropout))
+    regressor.add(LSTM(units))
+    regressor.add(Dropout(dropout))
+    regressor.add(Dense(units=1))
+    regressor.compile(optimizer='adam', loss='mean_squared_error')
+    return regressor
+
+def prepare_LSTM_training_data(df, scaler=None):
+    if 'close' not in df.columns:
+        raise ValueError("'close' column is required in the dataframe.")
+
+    data = df['close'].values.reshape(-1, 1)
+
+    if scaler is None:
+        scaler = MinMaxScaler()
+        data_scaled = scaler.fit_transform(data)
+    else:
+        data_scaled = scaler.transform(data)
+
+    X, y = [], []
+    for i in range(60, len(data_scaled)):
+        X.append(data_scaled[i-60:i, 0])
+        y.append(data_scaled[i, 0])
+
+    X = np.array(X).reshape(-1, 60, 1)
+    y = np.array(y)
+
+    return X, y, scaler
+
+# Modified code from <https://www.simplilearn.com/tutorials/machine-learning-tutorial/stock-price-prediction-using-machine-learning>
+def train_model_LSTM(X, y, input_shape=(60, 1), validation_split=0.1):
+    model = build_model_LSTM(input_shape)
+
+    early_stop = EarlyStopping(
+        monitor='val_loss',
+        patience=10,
+        restore_best_weights=True,
+        verbose=1
+    )
+
+    history = model.fit(
+        X, y,
+        epochs=100,
+        batch_size=32,
+        validation_split=validation_split,
+        verbose=1,
+        callbacks=[early_stop]
+    )
+
+    return model, history
+
+def save_model(model, path='btc_lstm_model.keras'):
+    model.save(path)
+
+def load_model_from_file(path='btc_lstm_model.keras'):
+    
+    return load_model(path)
+
+def run_LSTM_test():
+    # Get historical BTC/USD bars
+    df = crypto_bars('BTC/USD', "2024-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
+
+    if df.empty:
+        print("No data fetched. Exiting.")
+        return
+
+    df = df.reset_index()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
+
+    describe_data(df)
+    check_missing_and_outliers(df)
+
+    # Chronological 80/20 split
+    total_len = len(df)
+    train_len = int(total_len * 0.8)
+    train_df = df.iloc[:train_len]
+    test_df = df.iloc[train_len - 60:]  # include 60-step back for test sequences
+
+    # Prepare training/test sets
+    X_train, y_train, scaler = prepare_LSTM_training_data(train_df)
+    X_test, y_test, _ = prepare_LSTM_training_data(test_df, scaler=scaler)
+
+    # Train the model
+    model, history = train_model_LSTM(X_train, y_train)
+
+    # Save model
+    save_model(model)
+
+    # Plot training vs validation loss
+    plt.figure(figsize=(8, 4))
+    plt.plot(history.history['loss'], label='Training Loss')
+    if 'val_loss' in history.history:
+        plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.title('Loss Over Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss (MSE)')
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Predict on test set
+    predicted_scaled = model.predict(X_test)
+    predicted = scaler.inverse_transform(predicted_scaled)
+    actual = scaler.inverse_transform(y_test.reshape(-1, 1))
+
+    timestamps = test_df['timestamp'].iloc[60:]  # align with X_test
+
+    # Plot actual vs predicted prices
+    plt.figure(figsize=(14, 5))
+    plt.grid(True)
+    plt.plot(timestamps, actual, color='red', label='Actual BTC Price')
+    plt.plot(timestamps, predicted, color='blue', label='Predicted BTC Price')
+    plt.title('LSTM Prediction on Test Set (20%)')
+    plt.xlabel('Time')
+    plt.ylabel('BTC Price (USD)')
+    plt.xticks(rotation=45)
+    plt.legend()
+
+    # Eval metrics
+    mae = mean_absolute_error(actual, predicted)
+    rmse = np.sqrt(mean_squared_error(actual, predicted))
+    metrics_text = f'MAE: {mae:.2f}\nRMSE: {rmse:.2f}'
+    plt.gcf().text(0.5, 0.90, metrics_text, fontsize=10, ha='center', va='top',
+                   bbox=dict(facecolor='white', edgecolor='black', alpha=0.8))
+
+    plt.tight_layout()
+    plt.show()
+
+    return df, model, scaler
+
+def predict_next_LSTM_price(df, model, scaler, steps_ahead=24, symbol='BTC/USD', qty=0.001, buy_threshold=500, sell_threshold=-500):
+    recent_close = df['close'].values[-60:].reshape(-1, 1)
+    recent_scaled = scaler.transform(recent_close)
+
+    predictions = []
+    input_seq = recent_scaled.copy()
+
+    for _ in range(steps_ahead):
+        input_seq_reshaped = input_seq.reshape(1, 60, 1)
+        predicted_scaled = model.predict(input_seq_reshaped)
+        predicted_price = scaler.inverse_transform(predicted_scaled)[0][0]
+        predictions.append(predicted_price)
+        input_seq = np.append(input_seq[1:], predicted_scaled).reshape(60, 1)
+
+    last_timestamp = df['timestamp'].iloc[-1]
+    future_times = [last_timestamp + timedelta(hours=i + 1) for i in range(steps_ahead)]
+
+    # Plot forecast
+    plt.figure(figsize=(12, 5))
+    plt.plot(future_times, predictions, marker='o', label="Forecasted BTC Price", color='blue')
+    plt.title("24-Hour BTC Price Forecast (LSTM)")
+    plt.xlabel("Time")
+    plt.ylabel("Predicted BTC Price (USD)")
+    plt.xticks(rotation=45)
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Analyze changes and make trades
+    for i in range(1, len(predictions)):
+        delta = predictions[i] - predictions[i - 1]
+        if delta >= buy_threshold:
+            print(f"BUY SIGNAL: +${delta:.2f} @ Hour {i}")
+            execute_trade("BUY", symbol, qty)
+        elif delta <= sell_threshold:
+            print(f"SELL SIGNAL: -${abs(delta):.2f} @ Hour {i}")
+            execute_trade("SELL", symbol, qty)
+        else:
+            print(f"No significant change: ${delta:.2f} @ Hour {i}")
+
+    return predictions
+
+def objective(trial):
+    units = trial.suggest_categorical("units", [32, 50, 64, 100])
+    dropout = trial.suggest_float("dropout", 0.1, 0.5)
+    batch_size = trial.suggest_categorical("batch_size", [16, 32, 64])
+    epochs = trial.suggest_int("epochs", 30, 100)
+
+    # Re-fetch and split dataset inside for stateless tuning
+    df = crypto_bars('BTC/USD', "2024-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
+    if df.empty:
+        raise ValueError("Data fetch failed")
+
+    df = df.reset_index()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
+
+    train_len = int(len(df) * 0.8)
+    train_df = df.iloc[:train_len]
+
+    X_train, y_train, scaler = prepare_LSTM_training_data(train_df)
+
+    model = build_model_LSTM((60, 1), units=units, dropout=dropout)
+    early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+
+    history = model.fit(
+        X_train,
+        y_train,
+        validation_split=0.1,
+        epochs=epochs,
+        batch_size=batch_size,
+        verbose=0,
+        callbacks=[early_stop]
+    )
+
+    return min(history.history['val_loss'])  # best val loss
+
+def optimize_lstm_hyperparameters():
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=20)
+
+    print("Best hyperparameters:", study.best_params)
+    return study.best_params
+
+def execute_trade(signal: str, symbol: str, qty: float, time_in_force="gtc"):
+    print(f"Executing {signal} order for {qty} {symbol}")
+    if signal == "BUY":
+        return make_crypto_order(symbol, qty, time_in_force)
+    elif signal == "SELL":
+        return make_crypto_order(symbol, -qty, time_in_force)
+    else:
+        print("ERROR: Invalid trade signal")
+
+def save_best_params(best_params, path='best_lstm_params.json'):
+    with open(path, 'w') as f:
+        json.dump(best_params, f)
+    print(f"Saved best parameters to {path}")
+
+def load_best_params(path='best_lstm_params.json'):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"ERROR: {path} not found. Run hyperparameter optimization first.")
+    with open(path, 'r') as f:
+        best_params = json.load(f)
+    print(f"Loaded best parameters from {path}")
+    return best_params
+
+def simulate_trading(
+    df,
+    window_size=1000,
+    steps_ahead=24,
+    buy_threshold=500,
+    sell_threshold=-500,
+    initial_cash=10000,
+    btc_per_trade=0.001,
+    plot_equity=True
+):
+    df = df.copy()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['close'] = df['close'].astype(float)
+    equity_curve = []
+    trade_log = []
+
+    cash = initial_cash
+    btc = 0
+    portfolio_value = []
+
+    scaler = MinMaxScaler()
+
+    start_index = window_size
+    end_index = len(df) - steps_ahead
+
+    log.info(f"Starting rolling window simulation: {end_index - start_index} steps")
+
+    for t in range(start_index, end_index, steps_ahead):
+        if t % 240 == 0:
+            log.info("Still working... hold tight.")
+
+        log.info(f"Retraining model at index {t} ({df['timestamp'].iloc[t]})")
+
+        window_df = df.iloc[t - window_size:t]
+        future_df = df.iloc[t:t + steps_ahead]
+        
+        # Prepare training data
+        X_train, y_train, scaler = prepare_LSTM_training_data(window_df, scaler=None)
+        log.info(f"Training on window [{t - window_size}:{t}] - {len(X_train)} samples")
+
+        model = build_model_LSTM((60, 1))
+        model.fit(X_train, y_train, epochs=10, batch_size=32, verbose=0)
+
+        log.info("Predicting next prices...")
+
+        # Prepare prediction input
+        recent_close = df['close'].values[t - 60:t].reshape(-1, 1)
+        recent_scaled = scaler.transform(recent_close)
+
+        input_seq = recent_scaled.copy()
+        predictions = []
+
+        for _ in range(steps_ahead):
+            input_seq_reshaped = input_seq.reshape(1, 60, 1)
+            predicted_scaled = model.predict(input_seq_reshaped, verbose=0)
+            predicted_price = scaler.inverse_transform(predicted_scaled)[0][0]
+            predictions.append(predicted_price)
+            input_seq = np.append(input_seq[1:], predicted_scaled).reshape(60, 1)
+
+        # Simulate trades
+        for i in range(1, len(predictions)):
+            delta = predictions[i] - predictions[i - 1]
+            timestamp = future_df['timestamp'].iloc[i]
+            price = df['close'].iloc[t + i]
+
+            if delta >= buy_threshold and cash >= price * btc_per_trade:
+                # Simulate BUY
+                btc += btc_per_trade
+                cash -= price * btc_per_trade
+                trade_log.append({
+                    'timestamp': timestamp,
+                    'action': 'BUY',
+                    'price': price,
+                    'btc': btc_per_trade,
+                    'cash': cash
+                })
+            elif delta <= sell_threshold and btc >= btc_per_trade:
+                # Simulate SELL
+                btc -= btc_per_trade
+                cash += price * btc_per_trade
+                trade_log.append({
+                    'timestamp': timestamp,
+                    'action': 'SELL',
+                    'price': price,
+                    'btc': btc_per_trade,
+                    'cash': cash
+                })
+            else:
+                # No trade
+                pass
+
+            total_value = cash + btc * price
+            equity_curve.append((timestamp, total_value))
+            portfolio_value.append(total_value)
+
+    print(f"\nSimulation Complete:")
+    print(f"Final Portfolio Value: ${portfolio_value[-1]:.2f}")
+    print(f"Cash: ${cash:.2f}, BTC: {btc:.6f} (~${btc * df['close'].iloc[-1]:.2f})")
+    print(f"Trades executed: {len(trade_log)}")
+
+    if plot_equity:
+        # Plot equity curve
+        timestamps, values = zip(*equity_curve)
+        plt.figure(figsize=(12, 5))
+        plt.plot(timestamps, values, label='Equity Curve', color='green')
+        plt.title("Simulated Trading Equity Curve")
+        plt.xlabel("Time")
+        plt.ylabel("Portfolio Value (USD)")
+        plt.grid(True)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.legend()
+        plt.show()
+
+    return {
+        'final_value': portfolio_value[-1],
+        'trade_log': trade_log,
+        'equity_curve': equity_curve
+    }
+
+
 def main():
 
-    run_test.run_test()
+    # run_test.run_test()
 
+    # df, model, scaler = run_LSTM_test()
+    # future_prices = predict_next_LSTM_price(df, model, scaler, steps_ahead=24)
+
+
+    # # Run optuna tuning if needed
+    # best_params = optimize_lstm_hyperparameters()  # <- only once
+
+    # # Model training using best params
+    # df = crypto_bars('BTC/USD', "2024-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
+    # df = df.reset_index()
+    # df['timestamp'] = pd.to_datetime(df['timestamp'])
+    # df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
     
+    # total_len = len(df)
+    # train_len = int(total_len * 0.8)
+    # train_df = df.iloc[:train_len]
+    # test_df = df.iloc[train_len - 60:]
+
+    # X_train, y_train, scaler = prepare_LSTM_training_data(train_df)
+    # X_test, y_test, _ = prepare_LSTM_training_data(test_df, scaler=scaler)
+
+    # model = build_model_LSTM((60, 1), **best_params)
+    # early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+    # history = model.fit(X_train, y_train, validation_split=0.1, epochs=best_params["epochs"], batch_size=best_params["batch_size"], callbacks=[early_stop])
+
+    # # Visuals and forecasting
+    # save_model(model)
+    # predict_next_LSTM_price(df, model, scaler, steps_ahead=24)
+
+
+
+
+    # Run Optuna once to find & save best params
+    # Uncomment to re-optimize:
+    # best_params = optimize_lstm_hyperparameters()
+    # save_best_params(best_params)
+
+    # Load best params
+    # best_params = load_best_params()
+
+    # df = crypto_bars('BTC/USD', "2024-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
+    # if df.empty:
+    #     print("Data fetch failed.")
+    #     return
+
+    # df = df.reset_index()
+    # df['timestamp'] = pd.to_datetime(df['timestamp'])
+    # df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
+
+    # total_len = len(df)
+    # train_len = int(total_len * 0.8)
+    # train_df = df.iloc[:train_len]
+    # test_df = df.iloc[train_len - 60:]
+
+    # X_train, y_train, scaler = prepare_LSTM_training_data(train_df)
+    # X_test, y_test, _ = prepare_LSTM_training_data(test_df, scaler=scaler)
+
+    # model = build_model_LSTM(
+    #     input_shape=(60, 1),
+    #     units=best_params["units"],
+    #     dropout=best_params["dropout"]
+    # )
+
+    # early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+    # history = model.fit(
+    #     X_train, y_train,
+    #     validation_split=0.1,
+    #     epochs=best_params["epochs"],
+    #     batch_size=best_params["batch_size"],
+    #     callbacks=[early_stop]
+    # )
+
+    # #save_model(model)
+
+    # predict_next_LSTM_price(
+    #     df=df,
+    #     model=model,
+    #     scaler=scaler,
+    #     steps_ahead=24,
+    #     symbol='BTC/USD',
+    #     qty=0.001,
+    #     buy_threshold=500,
+    #     sell_threshold=-500
+    # )
+
+
+    # Load best Optuna params (optional if not using optimized)
+    try:
+        best_params = load_best_params()
+    except FileNotFoundError:
+        best_params = {
+            "units": 50,
+            "dropout": 0.2,
+            "batch_size": 32,
+            "epochs": 100
+        }
+
+    # Fetch historical data
+    df = crypto_bars(
+        symbol='BTC/USD',
+        start_date="2024-01-01",
+        end_date=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        limit=None,
+        timeframe=TimeFrame.Hour
+    )
+
+    if df.empty:
+        print("Data fetch failed.")
+        return
+
+    # Prep DataFrame
+    df = df.reset_index()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
+
+    # Run simulation - ALL - (rolling window retrain + trading logic)
+    result = simulate_trading(
+        df=df,
+        window_size=1000,
+        steps_ahead=24,
+        buy_threshold=500,
+        sell_threshold=-500,
+        initial_cash=10000,
+        btc_per_trade=0.001,
+        plot_equity=True
+    )
+
+    # Run this for short test
+    # result = simulate_trading(
+    #     df=df,
+    #     window_size=100,
+    #     steps_ahead=4,
+    #     buy_threshold=50,
+    #     sell_threshold=-50,
+    #     initial_cash=1000,
+    #     btc_per_trade=0.0001,
+    #     plot_equity=True
+    # )
+
+    # Display Summary
+    print("\nTrading simulation completed.")
+    print(f"Final portfolio value: ${result['final_value']:.2f}")
+    print(f"Total trades executed: {len(result['trade_log'])}")
+    print(f"Equity curve points: {len(result['equity_curve'])}")
+
+    # Optional: Save trade log to CSV
+    pd.DataFrame(result['trade_log']).to_csv("trade_log.csv", index=False)
+    print("Trade log saved to trade_log.csv")
+
 if __name__ == "__main__":
     main()
 
