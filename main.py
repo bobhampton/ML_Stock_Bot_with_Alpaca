@@ -24,6 +24,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetAssetsRequest, OrderRequest
 from alpaca.trading.enums import AssetClass, OrderSide, OrderType, OrderClass, TimeInForce
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+from collections import Counter
 
 # Setup logging
 logging.basicConfig(
@@ -524,25 +525,29 @@ def load_best_params(path='best_lstm_params.json'):
 def simulate_trading(
     df,
     window_size=1000,
-    steps_ahead=24,
-    buy_threshold=500,
-    sell_threshold=-500,
+    steps_ahead=6,  # Predict every 6 hours (~4x/day)
     initial_cash=10000,
     btc_per_trade=0.001,
-    plot_equity=True
+    plot_equity=True,
+    use_percent_change=True,
+    threshold_multiplier=0.05  # More sensitive
 ):
     df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['close'] = df['close'].astype(float)
+
+    # 🔬 Volatility analysis
+    df['abs_diff'] = df['close'].diff().abs()
+    avg_move = df['abs_diff'].mean()
+    std_move = df['abs_diff'].std()
+    print(f"[VOLATILITY] Avg hourly move: ${avg_move:.2f}, Std: ${std_move:.2f}")
+
     equity_curve = []
     trade_log = []
-
     cash = initial_cash
     btc = 0
     portfolio_value = []
-
     scaler = MinMaxScaler()
-
     start_index = window_size
     end_index = len(df) - steps_ahead
 
@@ -550,23 +555,20 @@ def simulate_trading(
 
     for t in range(start_index, end_index, steps_ahead):
         if t % 240 == 0:
-            log.info("Still working... hold tight.")
+            log.info("Still working... hold tight")
 
         log.info(f"Retraining model at index {t} ({df['timestamp'].iloc[t]})")
 
         window_df = df.iloc[t - window_size:t]
         future_df = df.iloc[t:t + steps_ahead]
-        
+
         # Prepare training data
         X_train, y_train, scaler = prepare_LSTM_training_data(window_df, scaler=None)
-        log.info(f"Training on window [{t - window_size}:{t}] - {len(X_train)} samples")
-
         model = build_model_LSTM((60, 1))
         model.fit(X_train, y_train, epochs=10, batch_size=32, verbose=0)
 
         log.info("Predicting next prices...")
 
-        # Prepare prediction input
         recent_close = df['close'].values[t - 60:t].reshape(-1, 1)
         recent_scaled = scaler.transform(recent_close)
 
@@ -580,14 +582,18 @@ def simulate_trading(
             predictions.append(predicted_price)
             input_seq = np.append(input_seq[1:], predicted_scaled).reshape(60, 1)
 
-        # Simulate trades
+        # Execute trades
         for i in range(1, len(predictions)):
-            delta = predictions[i] - predictions[i - 1]
             timestamp = future_df['timestamp'].iloc[i]
             price = df['close'].iloc[t + i]
+            prev_pred = predictions[i - 1]
+            curr_pred = predictions[i]
 
-            if delta >= buy_threshold and cash >= price * btc_per_trade:
-                # Simulate BUY
+            delta = ((curr_pred - prev_pred) / prev_pred) if use_percent_change else (curr_pred - prev_pred)
+            threshold = (0.003 if use_percent_change else (avg_move + std_move * threshold_multiplier))
+
+            if delta >= threshold and cash >= price * btc_per_trade:
+                # BUY
                 btc += btc_per_trade
                 cash -= price * btc_per_trade
                 trade_log.append({
@@ -597,8 +603,8 @@ def simulate_trading(
                     'btc': btc_per_trade,
                     'cash': cash
                 })
-            elif delta <= sell_threshold and btc >= btc_per_trade:
-                # Simulate SELL
+            elif delta <= -threshold and btc >= btc_per_trade:
+                # SELL
                 btc -= btc_per_trade
                 cash += price * btc_per_trade
                 trade_log.append({
@@ -608,9 +614,6 @@ def simulate_trading(
                     'btc': btc_per_trade,
                     'cash': cash
                 })
-            else:
-                # No trade
-                pass
 
             total_value = cash + btc * price
             equity_curve.append((timestamp, total_value))
@@ -619,10 +622,16 @@ def simulate_trading(
     print(f"\nSimulation Complete:")
     print(f"Final Portfolio Value: ${portfolio_value[-1]:.2f}")
     print(f"Cash: ${cash:.2f}, BTC: {btc:.6f} (~${btc * df['close'].iloc[-1]:.2f})")
-    print(f"Trades executed: {len(trade_log)}")
+    print(f"Trades Executed: {len(trade_log)}")
+
+    # Trades per day
+    if trade_log:
+        daily_trades = Counter(pd.to_datetime([t['timestamp'] for t in trade_log]).date)
+        print(f"\nTrades per day:")
+        for day, count in sorted(daily_trades.items()):
+            print(f"{day}: {count}")
 
     if plot_equity:
-        # Plot equity curve
         timestamps, values = zip(*equity_curve)
         plt.figure(figsize=(12, 5))
         plt.plot(timestamps, values, label='Equity Curve', color='green')
@@ -640,6 +649,21 @@ def simulate_trading(
         'trade_log': trade_log,
         'equity_curve': equity_curve
     }
+
+
+
+# Calculate average hourly price movement
+def analyze_volatility(df):
+    df = df.copy()
+    df['returns'] = df['close'].pct_change() * 100
+    df['abs_diff'] = df['close'].diff().abs()
+    
+    mean_change = df['abs_diff'].mean()
+    std_change = df['abs_diff'].std()
+    print(f"Average hourly move: ${mean_change:.2f}, Std Dev: ${std_change:.2f}")
+    
+    return mean_change, std_change
+
 
 def main():
     # Load best Optuna params (optional if not using optimized)
@@ -673,15 +697,16 @@ def main():
 
     # Run simulation - ALL - (rolling window retrain + trading logic)
     result = simulate_trading(
-        df=df,
-        window_size=1000,
-        steps_ahead=24,
-        buy_threshold=500,
-        sell_threshold=-500,
-        initial_cash=10000,
-        btc_per_trade=0.001,
-        plot_equity=True
-    )
+    df=df,
+    window_size=1000,
+    steps_ahead=6,                # 4x predictions/day
+    initial_cash=10000,
+    btc_per_trade=0.001,
+    plot_equity=True,
+    use_percent_change=True,     # Predict % price move
+    threshold_multiplier=0.05    # High sensitivity for more trades
+)
+
 
     # Run this for short test
     # result = simulate_trading(
