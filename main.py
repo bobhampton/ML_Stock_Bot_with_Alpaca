@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import time
 import os
 import numpy as np
 import logging
@@ -6,6 +7,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import run_test
 import optuna
+import tensorflow as tf
 import json
 from dotenv import load_dotenv
 from sklearn.preprocessing import MinMaxScaler
@@ -542,8 +544,12 @@ def safe_simulate_trading(
     use_percent_change=True,
     threshold_multiplier=0.05,
     plot_path="safe_equity_curve.png",
-    best_params=None  # <<< Add this
+    best_params=None,
+    retrain_interval=12  # retrain every N steps
 ):
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+    tf.get_logger().setLevel("ERROR")
+
     print(f"window_size: {window_size}, steps_ahead: {steps_ahead}, threshold_multiplier: {threshold_multiplier}")
     df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -563,47 +569,60 @@ def safe_simulate_trading(
     start_index = window_size
     end_index = len(df) - steps_ahead
 
-    log.info(f"Starting rolling window simulation: {end_index - start_index} steps")
+    loop_durations = []
+    total_loops = (end_index - start_index) // steps_ahead
+    model = None
+    recent_model_time = None
 
-    for t in range(start_index, end_index, steps_ahead):
+    for t_idx, t in enumerate(range(start_index, end_index, steps_ahead), 1):
+        loop_start_time = time.time()
+
         if t % 240 == 0:
             log.info("Still working... index: {}".format(t))
 
-        log.info(f"Retraining model at index {t} ({df['timestamp'].iloc[t]})")
+        # Retrain model at intervals
+        if recent_model_time is None or (t - recent_model_time) >= retrain_interval:
+            log.info(f"Retraining model at index {t} ({df['timestamp'].iloc[t]})")
 
-        window_df = df.iloc[t - window_size:t]
-        future_df = df.iloc[t:t + steps_ahead]
+            window_df = df.iloc[t - window_size:t]
+            future_df = df.iloc[t:t + steps_ahead]
 
-        try:
-            X_train, y_train, scaler = prepare_LSTM_training_data(window_df, scaler=None)
-        except Exception as e:
-            print(f"Training data prep error at index {t}: {e}")
-            continue
+            try:
+                X_train, y_train, scaler = prepare_LSTM_training_data(window_df, scaler=None)
+            except Exception as e:
+                print(f"Training data prep error at index {t}: {e}")
+                continue
 
-        units = best_params.get("units", 50) if best_params else 50
-        dropout = best_params.get("dropout", 0.2) if best_params else 0.2
-        epochs = best_params.get("epochs", 10) if best_params else 10
-        batch_size = best_params.get("batch_size", 32) if best_params else 32
+            if model:
+                del model
+                K.clear_session()
+                gc.collect()
 
-        model = build_model_LSTM((60, 1), units=units, dropout=dropout)
-        model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
+            units = min(best_params.get("units", 50), 32) if best_params else 32
+            dropout = best_params.get("dropout", 0.2) if best_params else 0.2
+            epochs = min(best_params.get("epochs", 10), 5) if best_params else 5
+            batch_size = best_params.get("batch_size", 32) if best_params else 32
 
-        log.info("Predicting next prices...")
+            model = build_model_LSTM((60, 1), units=units, dropout=dropout)
+            model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
 
+            recent_model_time = t
+
+        # Prediction batch
         recent_close = df['close'].values[t - 60:t].reshape(-1, 1)
         recent_scaled = scaler.transform(recent_close)
-
-        input_seq = recent_scaled.copy()
-        predictions = []
+        input_sequences = []
+        temp_input = recent_scaled.copy()
 
         for _ in range(steps_ahead):
-            input_seq_reshaped = input_seq.reshape(1, 60, 1)
-            predicted_scaled = model.predict(input_seq_reshaped, verbose=0)
-            predicted_price = scaler.inverse_transform(predicted_scaled)[0][0]
-            predictions.append(predicted_price)
-            input_seq = np.append(input_seq[1:], predicted_scaled).reshape(60, 1)
+            input_sequences.append(temp_input.reshape(1, 60, 1))
+            temp_input = np.append(temp_input[1:], temp_input[-1]).reshape(60, 1)
 
-        # Trade logic
+        batch_input = np.concatenate(input_sequences, axis=0)
+        predicted_scaled = model.predict(batch_input, verbose=0)
+        predictions = scaler.inverse_transform(predicted_scaled).flatten().tolist()
+        future_df = df.iloc[t:t + steps_ahead]
+
         for i in range(1, len(predictions)):
             timestamp = future_df['timestamp'].iloc[i]
             price = df['close'].iloc[t + i]
@@ -614,8 +633,7 @@ def safe_simulate_trading(
             threshold = (0.003 if use_percent_change else (avg_move + std_move * threshold_multiplier))
 
             if delta >= threshold and cash >= price * btc_per_trade:
-                print(f"BUY SIGNAL: +${delta:.2f} @ Hour {i}")
-                print(f"Buying {btc_per_trade} BTC at ${price:.2f}")
+                print(f"BUY SIGNAL: +{delta:.4f} @ {timestamp}")
                 btc += btc_per_trade
                 cash -= price * btc_per_trade
                 trade_log.append({
@@ -626,8 +644,7 @@ def safe_simulate_trading(
                     'cash': cash
                 })
             elif delta <= -threshold and btc >= btc_per_trade:
-                print(f"SELL SIGNAL: -${abs(delta):.2f} @ Hour {i}")
-                print(f"Selling {btc_per_trade} BTC at ${price:.2f}")
+                print(f"SELL SIGNAL: {delta:.4f} @ {timestamp}")
                 btc -= btc_per_trade
                 cash += price * btc_per_trade
                 trade_log.append({
@@ -642,11 +659,19 @@ def safe_simulate_trading(
             equity_curve.append((timestamp, total_value))
             portfolio_value.append(total_value)
 
-        # Memory cleanup
-        del model
-        K.clear_session()
-        gc.collect()
+        # Loop timing & ETA
+        # loop_time = time.time() - loop_start_time
+        # loop_durations.append(loop_time)
 
+        # avg_loop = np.mean(loop_durations)
+        # loops_remaining = total_loops - t_idx
+        # eta_seconds = int(avg_loop * loops_remaining)
+        # eta_str = str(timedelta(seconds=eta_seconds))
+
+        # log.info(f"Loop {t_idx}/{total_loops} | Time: {loop_time:.2f}s | ETA remaining: {eta_str}")
+        log.info(f"Loop {t_idx}/{total_loops}")
+
+    # Final output
     print("\nSimulation Complete:")
     print(f"Final Portfolio Value: ${portfolio_value[-1]:.2f}")
     print(f"Cash: ${cash:.2f}, BTC: {btc:.6f} (~${btc * df['close'].iloc[-1]:.2f})")
@@ -658,9 +683,8 @@ def safe_simulate_trading(
         for day, count in sorted(daily_trades.items()):
             print(f"{day}: {count}")
 
-    if plot_equity:
+    if plot_equity and equity_curve:
         timestamps, values = zip(*equity_curve)
-
         plt.figure(figsize=(12, 5))
         plt.plot(timestamps, values, label='Equity Curve', color='green')
         plt.title("Simulated Trading Equity Curve")
@@ -674,10 +698,12 @@ def safe_simulate_trading(
         plt.close('all')
 
     return {
-        'final_value': portfolio_value[-1],
+        'final_value': portfolio_value[-1] if portfolio_value else initial_cash,
         'trade_log': trade_log,
         'equity_curve': equity_curve
     }
+
+
 
 
 
@@ -720,7 +746,8 @@ def run_backtest1(best_params=None):
     window_size=1000,     
     # 6 is 4x predictions/day
     # stepping down to 3 to see if it helps with performance
-    steps_ahead=3,                
+    steps_ahead=3,
+    retrain_interval=12,            
     initial_cash=10000,
     btc_per_trade=0.001,
     plot_equity=True,
