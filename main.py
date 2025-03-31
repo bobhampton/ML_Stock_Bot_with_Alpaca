@@ -12,6 +12,8 @@ from sklearn.preprocessing import MinMaxScaler
 from keras.models import Sequential, load_model
 from keras.layers import Dense, LSTM, Dropout, Input
 from keras.callbacks import EarlyStopping
+from keras import backend as K
+import gc
 import alpaca_trade_api as tradeapi
 from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import (
@@ -383,7 +385,10 @@ def run_LSTM_test():
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
+    plt.pause(3)  # show it briefly
+    plt.savefig("training_loss.png")
+    plt.close('all')
 
     # Predict on test set
     predicted_scaled = model.predict(X_test)
@@ -391,6 +396,11 @@ def run_LSTM_test():
     actual = scaler.inverse_transform(y_test.reshape(-1, 1))
 
     timestamps = test_df['timestamp'].iloc[60:]  # align with X_test
+
+    # Eval metrics
+    mae = mean_absolute_error(actual, predicted)
+    rmse = np.sqrt(mean_squared_error(actual, predicted))
+    metrics_text = f'MAE: {mae:.2f}\nRMSE: {rmse:.2f}'
 
     # Plot actual vs predicted prices
     plt.figure(figsize=(14, 5))
@@ -402,16 +412,13 @@ def run_LSTM_test():
     plt.ylabel('BTC Price (USD)')
     plt.xticks(rotation=45)
     plt.legend()
-
-    # Eval metrics
-    mae = mean_absolute_error(actual, predicted)
-    rmse = np.sqrt(mean_squared_error(actual, predicted))
-    metrics_text = f'MAE: {mae:.2f}\nRMSE: {rmse:.2f}'
     plt.gcf().text(0.5, 0.90, metrics_text, fontsize=10, ha='center', va='top',
                    bbox=dict(facecolor='white', edgecolor='black', alpha=0.8))
-
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
+    plt.pause(3)  # show it briefly
+    plt.savefig("LSTM_Prediction_on_Test_Set.png")
+    plt.close('all')
 
     return df, model, scaler
 
@@ -442,7 +449,10 @@ def predict_next_LSTM_price(df, model, scaler, steps_ahead=24, symbol='BTC/USD',
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
+    plt.pause(3)  # show it briefly
+    plt.savefig("forecasted_btc_price.png")
+    plt.close('all')
 
     # Analyze changes and make trades
     for i in range(1, len(predictions)):
@@ -522,21 +532,23 @@ def load_best_params(path='best_lstm_params.json'):
     print(f"Loaded best parameters from {path}")
     return best_params
 
-def simulate_trading(
+def safe_simulate_trading(
     df,
     window_size=1000,
-    steps_ahead=6,  # Predict every 6 hours (~4x/day)
+    steps_ahead=6,
     initial_cash=10000,
     btc_per_trade=0.001,
     plot_equity=True,
     use_percent_change=True,
-    threshold_multiplier=0.05  # More sensitive
+    threshold_multiplier=0.05,
+    plot_path="safe_equity_curve.png",
+    best_params=None  # <<< Add this
 ):
+    print(f"window_size: {window_size}, steps_ahead: {steps_ahead}, threshold_multiplier: {threshold_multiplier}")
     df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['close'] = df['close'].astype(float)
 
-    # 🔬 Volatility analysis
     df['abs_diff'] = df['close'].diff().abs()
     avg_move = df['abs_diff'].mean()
     std_move = df['abs_diff'].std()
@@ -555,17 +567,26 @@ def simulate_trading(
 
     for t in range(start_index, end_index, steps_ahead):
         if t % 240 == 0:
-            log.info("Still working... hold tight")
+            log.info("Still working... index: {}".format(t))
 
         log.info(f"Retraining model at index {t} ({df['timestamp'].iloc[t]})")
 
         window_df = df.iloc[t - window_size:t]
         future_df = df.iloc[t:t + steps_ahead]
 
-        # Prepare training data
-        X_train, y_train, scaler = prepare_LSTM_training_data(window_df, scaler=None)
-        model = build_model_LSTM((60, 1))
-        model.fit(X_train, y_train, epochs=10, batch_size=32, verbose=0)
+        try:
+            X_train, y_train, scaler = prepare_LSTM_training_data(window_df, scaler=None)
+        except Exception as e:
+            print(f"Training data prep error at index {t}: {e}")
+            continue
+
+        units = best_params.get("units", 50) if best_params else 50
+        dropout = best_params.get("dropout", 0.2) if best_params else 0.2
+        epochs = best_params.get("epochs", 10) if best_params else 10
+        batch_size = best_params.get("batch_size", 32) if best_params else 32
+
+        model = build_model_LSTM((60, 1), units=units, dropout=dropout)
+        model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
 
         log.info("Predicting next prices...")
 
@@ -582,7 +603,7 @@ def simulate_trading(
             predictions.append(predicted_price)
             input_seq = np.append(input_seq[1:], predicted_scaled).reshape(60, 1)
 
-        # Execute trades
+        # Trade logic
         for i in range(1, len(predictions)):
             timestamp = future_df['timestamp'].iloc[i]
             price = df['close'].iloc[t + i]
@@ -593,7 +614,8 @@ def simulate_trading(
             threshold = (0.003 if use_percent_change else (avg_move + std_move * threshold_multiplier))
 
             if delta >= threshold and cash >= price * btc_per_trade:
-                # BUY
+                print(f"BUY SIGNAL: +${delta:.2f} @ Hour {i}")
+                print(f"Buying {btc_per_trade} BTC at ${price:.2f}")
                 btc += btc_per_trade
                 cash -= price * btc_per_trade
                 trade_log.append({
@@ -604,7 +626,8 @@ def simulate_trading(
                     'cash': cash
                 })
             elif delta <= -threshold and btc >= btc_per_trade:
-                # SELL
+                print(f"SELL SIGNAL: -${abs(delta):.2f} @ Hour {i}")
+                print(f"Selling {btc_per_trade} BTC at ${price:.2f}")
                 btc -= btc_per_trade
                 cash += price * btc_per_trade
                 trade_log.append({
@@ -619,20 +642,25 @@ def simulate_trading(
             equity_curve.append((timestamp, total_value))
             portfolio_value.append(total_value)
 
-    print(f"\nSimulation Complete:")
+        # Memory cleanup
+        del model
+        K.clear_session()
+        gc.collect()
+
+    print("\nSimulation Complete:")
     print(f"Final Portfolio Value: ${portfolio_value[-1]:.2f}")
     print(f"Cash: ${cash:.2f}, BTC: {btc:.6f} (~${btc * df['close'].iloc[-1]:.2f})")
     print(f"Trades Executed: {len(trade_log)}")
 
-    # Trades per day
     if trade_log:
-        daily_trades = Counter(pd.to_datetime([t['timestamp'] for t in trade_log]).date)
-        print(f"\nTrades per day:")
+        daily_trades = Counter(pd.to_datetime([t['timestamp'] for t in trade_log]).dt.date)
+        print("\nTrades per day:")
         for day, count in sorted(daily_trades.items()):
             print(f"{day}: {count}")
 
     if plot_equity:
         timestamps, values = zip(*equity_curve)
+
         plt.figure(figsize=(12, 5))
         plt.plot(timestamps, values, label='Equity Curve', color='green')
         plt.title("Simulated Trading Equity Curve")
@@ -642,13 +670,15 @@ def simulate_trading(
         plt.xticks(rotation=45)
         plt.tight_layout()
         plt.legend()
-        plt.show()
+        plt.savefig(plot_path)
+        plt.close('all')
 
     return {
         'final_value': portfolio_value[-1],
         'trade_log': trade_log,
         'equity_curve': equity_curve
     }
+
 
 
 
@@ -664,20 +694,8 @@ def analyze_volatility(df):
     
     return mean_change, std_change
 
-
-def main():
-    # Load best Optuna params (optional if not using optimized)
-    try:
-        best_params = load_best_params()
-    except FileNotFoundError:
-        best_params = {
-            "units": 50,
-            "dropout": 0.2,
-            "batch_size": 32,
-            "epochs": 100
-        }
-
-    # Fetch historical data
+def run_backtest1(best_params=None):
+        # Fetch historical data
     df = crypto_bars(
         symbol='BTC/USD',
         start_date="2024-01-01",
@@ -696,29 +714,20 @@ def main():
     df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
 
     # Run simulation - ALL - (rolling window retrain + trading logic)
-    result = simulate_trading(
+    result = safe_simulate_trading(
     df=df,
-    window_size=1000,
-    steps_ahead=6,                # 4x predictions/day
+    # 1000 hours took a long time to run, trying 500
+    window_size=1000,     
+    # 6 is 4x predictions/day
+    # stepping down to 3 to see if it helps with performance
+    steps_ahead=3,                
     initial_cash=10000,
     btc_per_trade=0.001,
     plot_equity=True,
-    use_percent_change=True,     # Predict % price move
-    threshold_multiplier=0.05    # High sensitivity for more trades
+    use_percent_change=True,        # Predict % price move
+    threshold_multiplier=0.05,      # High sensitivity for more trades
+    best_params=best_params    
 )
-
-
-    # Run this for short test
-    # result = simulate_trading(
-    #     df=df,
-    #     window_size=100,
-    #     steps_ahead=4,
-    #     buy_threshold=50,
-    #     sell_threshold=-50,
-    #     initial_cash=1000,
-    #     btc_per_trade=0.0001,
-    #     plot_equity=True
-    # )
 
     # Display Summary
     print("\nTrading simulation completed.")
@@ -729,6 +738,96 @@ def main():
     # Optional: Save trade log to CSV
     pd.DataFrame(result['trade_log']).to_csv("trade_log.csv", index=False)
     print("Trade log saved to trade_log.csv")
+
+def load_trade_log(path='trade_log.csv'):
+    if not os.path.exists(path):
+        print(f"File not found: {path}")
+        return []
+    df = pd.read_csv(path)
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    return df.to_dict(orient='records')
+
+def analyze_trade_wins(trade_log):
+    if not trade_log:
+        print("No trades to analyze.")
+        return
+
+    from statistics import mean, median
+
+    trades = pd.DataFrame(trade_log)
+    trades['timestamp'] = pd.to_datetime(trades['timestamp'])
+    trades = trades.sort_values('timestamp')
+
+    positions = []
+    holding = 0
+    entry_price = 0
+    wins = []
+    losses = []
+
+    for _, row in trades.iterrows():
+        if row['action'] == 'BUY':
+            holding += row['btc']
+            entry_price += row['price'] * row['btc']
+        elif row['action'] == 'SELL' and holding > 0:
+            avg_entry = entry_price / holding
+            pnl = (row['price'] - avg_entry) * row['btc']
+            positions.append({
+                'timestamp': row['timestamp'],
+                'entry_price': avg_entry,
+                'exit_price': row['price'],
+                'btc': row['btc'],
+                'pnl': pnl
+            })
+            if pnl >= 0:
+                wins.append(pnl)
+            else:
+                losses.append(pnl)
+            # Reduce holding + entry_price for multi-partial trades
+            holding -= row['btc']
+            entry_price -= avg_entry * row['btc']
+
+    if not positions:
+        print("No closed positions (BUY followed by SELL).")
+        return
+
+    # Summary Stats
+    total = len(positions)
+    win_count = len(wins)
+    loss_count = len(losses)
+    win_rate = win_count / total * 100
+    avg_win = mean(wins) if wins else 0
+    avg_loss = mean(losses) if losses else 0
+    best = max(wins) if wins else 0
+    worst = min(losses) if losses else 0
+    net_profit = sum(wins) + sum(losses)
+
+    print(f"\nTRADE WIN ANALYSIS:")
+    print(f"Closed Trades: {total}")
+    print(f"Wins: {win_count} | Losses: {loss_count}")
+    print(f"Win Rate: {win_rate:.2f}%")
+    print(f"Average Win: ${avg_win:.2f}")
+    print(f"Average Loss: ${avg_loss:.2f}")
+    print(f"Best Trade: +${best:.2f}")
+    print(f"Worst Trade: ${worst:.2f}")
+    print(f"Net Profit (Closed Trades): ${net_profit:.2f}")
+
+
+def main():
+    # Load best Optuna params (optional if not using optimized)
+    try:
+        best_params = load_best_params()
+    except FileNotFoundError:
+        best_params = {
+            "units": 50,
+            "dropout": 0.2,
+            "batch_size": 32,
+            "epochs": 100
+        }
+
+    run_backtest1(best_params=best_params)
+
+    trade_log = load_trade_log('trade_log.csv')
+    analyze_trade_wins(trade_log)
 
 if __name__ == "__main__":
     main()
