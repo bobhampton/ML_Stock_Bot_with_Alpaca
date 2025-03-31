@@ -102,107 +102,6 @@ def crypto_quotes(symbol, start_date, end_date, limit, timeframe):
     # Return the data as a dataframe.
     return data.df  
 
-def stock_bars(symbol, start_date, end_date, limit, timeframe, latest=False):
-    stock_data_client = StockHistoricalDataClient(
-        api_key,
-        secret_key
-    )
-
-    # Define request
-    request = StockBarsRequest(
-        symbol_or_symbols=symbol,
-        start=start_date,
-        end=end_date,
-        limit=limit,
-        timeframe=timeframe,
-    )
-
-    # Get the data.
-    data = stock_data_client.get_stock_bars(request_params=request)
-
-    if latest:
-        # Get the latest bar for the stock.
-        request = StockLatestBarRequest(symbol_or_symbols=[symbol])
-        latest_bar = stock_data_client.get_stock_latest_bar(request_params=request)
-        return latest_bar
-
-    # Return the data as a dataframe.
-    return data.df
-
-def stock_quotes(symbol, start_date, end_date, limit, timeframe):
-    # Initialize the StockHistoricalDataClient.
-    stock_data_client = StockHistoricalDataClient(
-        api_key,
-        secret_key
-    )
-
-    # Define a request using the StockQuotesRequest class.
-    request = StockQuotesRequest(
-        symbol_or_symbols=symbol,
-        start=start_date,
-        end=end_date,
-        limit=limit,
-        timeframe=timeframe
-    )
-
-    # Get the data.
-    data = stock_data_client.get_stock_quotes(request_params=request)
-
-    # Return the data as a dataframe.
-    return data.df
-
-# Function to get all or individual crypto or stock assets
-# Left this in, but will need to update to switch cases
-def get_assets(symbol):
-    trading_client = TradingClient(
-        api_key,
-        secret_key,
-        paper=True
-    )
-
-    # search for crypto assets
-    request_crypto = GetAssetsRequest(
-        asset_class=AssetClass.CRYPTO,
-    )
-
-    # search for stocks assets
-    request_stocks = GetAssetsRequest(
-        asset_class=AssetClass.US_EQUITY,
-    )
-
-    # Get all crypto assets
-    assets = trading_client.get_all_assets(request_crypto)
-    #print(assets)
-
-    # Get all stocks assets
-    assets = trading_client.get_all_assets(request_stocks)
-    #print(assets)   
-
-    # Grab a specific asset
-    asset = trading_client.get_asset(symbol_or_asset_id=symbol)
-    print(asset)
-
-def make_stock_order(symbol, qty, time_in_force):
-    trading_client = TradingClient(
-        api_key,
-        secret_key,
-        paper=True
-    )
-
-    # Let's define a new order request.
-    order_request = OrderRequest(
-        symbol=symbol,
-        qty=qty,
-        side=OrderSide.BUY,
-        type=OrderType.MARKET,
-        order_class=OrderClass.SIMPLE,
-        time_in_force=time_in_force,
-        extended_hours=False
-    )
-
-    # Submit the order.
-    order_submission_response = trading_client.submit_order(order_data=order_request)
-    return order_submission_response
 
 # Makes a market crypto order
 def make_crypto_order(symbol, qty, time_in_force):
@@ -222,46 +121,8 @@ def make_crypto_order(symbol, qty, time_in_force):
         time_in_force=time_in_force
     )
 
-    # if account.cash >= estimated_risk:
-    #     print(f"Estimated risk is within acceptable limits. Proceeding with order for {qty} of {symbol}.")
-    # else:
-    #     print(f"Estimated risk exceeds acceptable limits. Cannot proceed with order for {qty} of {symbol}.")
-    # Submit the order.
     order_submission_response = trading_client.submit_order(order_data=order_request)
     return order_submission_response
-
-# Can only get a max of 50 articles.
-def get_news(symbol, limit=50):
-    # Initialize the NewsClient.
-    news_data_client = NewsClient(
-        api_key,
-        secret_key
-    )
-
-    # Initialize the NewsRequest.
-    request = NewsRequest(
-        symbols=symbol,
-        limit=limit
-    )
-
-    # List to store all news data
-    all_news_data = []
-
-    # Now let's get the data.
-    news_data = news_data_client.get_news(request)
-    all_news_data.append(news_data)
-
-    # If there are more articles, we can get them by using the next_page_token.
-    while next_page_token := news_data.next_page_token:
-        request = NewsRequest(
-            symbols=symbol,
-            limit=limit,
-            page_token=next_page_token
-        )
-        news_data = news_data_client.get_news(request)
-        all_news_data.append(news_data)
-
-    return all_news_data
 
 def describe_data(df):
     print("Statistical summary of raw BTC data:")
@@ -345,6 +206,7 @@ def load_model_from_file(path='btc_lstm_model.keras'):
     
     return load_model(path)
 
+# Function to test and visualize the LSTM model's loss and predicted vs actual prices and
 def run_LSTM_test():
     # Get historical BTC/USD bars
     df = crypto_bars('BTC/USD', "2024-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
@@ -363,7 +225,10 @@ def run_LSTM_test():
     # Chronological 80/20 split
     total_len = len(df)
     train_len = int(total_len * 0.8)
-    train_df = df.iloc[:train_len]
+
+    # Split the data
+    #train_df = df.iloc[:train_len] # need to exclude 60-step back for training sequences
+    train_df = df.iloc[:train_len - 60]  # exclude 60-step back for training sequences
     test_df = df.iloc[train_len - 60:]  # include 60-step back for test sequences
 
     # Prepare training/test sets
@@ -374,9 +239,9 @@ def run_LSTM_test():
     model, history = train_model_LSTM(X_train, y_train)
 
     # Save model
-    save_model(model)
+    #save_model(model)
 
-    # Plot training vs validation loss
+    # Plot training and validation loss
     plt.figure(figsize=(8, 4))
     plt.plot(history.history['loss'], label='Training Loss')
     if 'val_loss' in history.history:
@@ -577,9 +442,6 @@ def safe_simulate_trading(
     for t_idx, t in enumerate(range(start_index, end_index, steps_ahead), 1):
         loop_start_time = time.time()
 
-        if t % 240 == 0:
-            log.info("Still working... index: {}".format(t))
-
         # Retrain model at intervals
         if recent_model_time is None or (t - recent_model_time) >= retrain_interval:
             log.info(f"Retraining model at index {t} ({df['timestamp'].iloc[t]})")
@@ -592,7 +454,8 @@ def safe_simulate_trading(
             except Exception as e:
                 print(f"Training data prep error at index {t}: {e}")
                 continue
-
+            
+            # Check if model exists and delete it to free up memory
             if model:
                 del model
                 K.clear_session()
@@ -719,7 +582,7 @@ def run_backtest1(best_params=None):
         # Fetch historical data
     df = crypto_bars(
         symbol='BTC/USD',
-        start_date="2025-01-01",
+        start_date="2024-01-01",
         end_date=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         limit=None,
         timeframe=TimeFrame.Hour
@@ -833,23 +696,137 @@ def analyze_trade_wins(trade_log):
     print(f"Worst Trade: ${worst:.2f}")
     print(f"Net Profit (Closed Trades): ${net_profit:.2f}")
 
+# Predict multiple steps ahead without using real data
+def predict_multi_step(model, scaler, initial_sequence, steps_ahead):
+    predictions = []
+    input_seq = initial_sequence.copy()  # Start with the initial sequence
+
+    for _ in range(steps_ahead):
+        print(f"Predicting step {_ + 1}/{steps_ahead}...")
+        # Reshape input sequence for the model
+        input_seq_reshaped = input_seq.reshape(1, 60, 1)
+
+        # Predict the next step
+        predicted_scaled = model.predict(input_seq_reshaped, verbose=0)
+        predicted_price = scaler.inverse_transform(predicted_scaled)[0][0]
+
+        # Append the prediction to the results
+        predictions.append(predicted_price)
+
+        # Update the input sequence: Remove the oldest value and add the new prediction
+        input_seq = np.append(input_seq[1:], predicted_scaled).reshape(60, 1)
+
+    return predictions
+
+def run_multi_step_test(start_date="2024-01-01", steps_ahead = 24):
+    # Get historical BTC/USD bars
+    df = crypto_bars('BTC/USD', start_date, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
+
+    if df.empty:
+        print("No data fetched. Exiting.")
+        return
+
+    df = df.reset_index()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
+
+    describe_data(df)
+    check_missing_and_outliers(df)
+
+    # Chronological 80/20 split
+    total_len = len(df)
+    train_len = int(total_len * 0.8)
+
+    # Split the data
+    train_df = df.iloc[:train_len - 60]  # Exclude the last 60 rows from training
+    test_df = df.iloc[train_len - 60:]  # Include 60 rows before the test set for lookback
+
+    # Prepare training/test sets
+    X_train, y_train, scaler = prepare_LSTM_training_data(train_df)
+    X_test, y_test, _ = prepare_LSTM_training_data(test_df, scaler=scaler)
+
+    # Train the model
+    model, history = train_model_LSTM(X_train, y_train)
+
+    # Save model
+    # save_model(model)
+
+    # Plot training and validation loss
+    plt.figure(figsize=(8, 4))
+    plt.plot(history.history['loss'], label='Training Loss')
+    if 'val_loss' in history.history:
+        plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.title('Loss Over Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss (MSE)')
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show(block=False)
+    plt.pause(3)  # show it briefly
+    plt.savefig("training_loss.png")
+    plt.close('all')
+
+    # Predict multiple steps ahead
+    print(f"\nPredicting {steps_ahead} steps ahead...\n")
+    initial_sequence = X_test[-1]  # Use the last sequence from the test set
+    predictions = predict_multi_step(model, scaler, initial_sequence, steps_ahead)
+
+    # Align predictions with timestamps
+    last_timestamp = test_df['timestamp'].iloc[-1]
+    future_times = [last_timestamp + timedelta(hours=i + 1) for i in range(steps_ahead)]
+
+    # Get actual prices for comparison
+    actual_prices = test_df['close'].iloc[-steps_ahead:].values  # Last `steps_ahead` actual prices
+
+    # Calculate MAE and RMSE
+    mae = mean_absolute_error(actual_prices, predictions)
+    rmse = np.sqrt(mean_squared_error(actual_prices, predictions))
+    metrics_text = f"MAE: {mae:.2f}\nRMSE: {rmse:.2f}"
+
+    # Plot predictions vs actual prices
+    plt.figure(figsize=(12, 5))
+    plt.plot(future_times, actual_prices, marker='o', label="Actual BTC Price", color='red')
+    plt.plot(future_times, predictions, marker='o', label="Predicted BTC Price", color='blue')
+    plt.title(f"{steps_ahead}-Hour BTC Price Forecast (LSTM)")
+    plt.xlabel("Time")
+    plt.ylabel("BTC Price (USD)")
+    plt.xticks(rotation=45)
+    plt.grid(True)
+    plt.legend()
+
+    # Add MAE and RMSE to the plot
+    plt.gcf().text(
+        0.5, 0.90, metrics_text, fontsize=10, ha='center', va='top',
+        bbox=dict(facecolor='white', edgecolor='black', alpha=0.8)
+    )
+
+    plt.tight_layout()
+    plt.show(block=False)
+    plt.pause(3)  # show it briefly
+    plt.savefig("multi_step_forecast.png")
+    plt.close('all')
+
+    return df, model, scaler
 
 def main():
     # Load best Optuna params (optional if not using optimized)
-    try:
-        best_params = load_best_params()
-    except FileNotFoundError:
-        best_params = {
-            "units": 50,
-            "dropout": 0.2,
-            "batch_size": 32,
-            "epochs": 100
-        }
+    # try:
+    #     best_params = load_best_params()
+    # except FileNotFoundError:
+    #     best_params = {
+    #         "units": 50,
+    #         "dropout": 0.2,
+    #         "batch_size": 32,
+    #         "epochs": 100
+    #     }
 
-    run_backtest1(best_params=best_params)
+    # run_backtest1(best_params=best_params)
 
-    trade_log = load_trade_log('trade_log.csv')
-    analyze_trade_wins(trade_log)
+    # trade_log = load_trade_log('trade_log.csv')
+    # analyze_trade_wins(trade_log)
+
+    run_multi_step_test()
 
 if __name__ == "__main__":
     main()
