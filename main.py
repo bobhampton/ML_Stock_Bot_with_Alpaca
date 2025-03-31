@@ -677,11 +677,11 @@ def safe_simulate_trading(
     print(f"Cash: ${cash:.2f}, BTC: {btc:.6f} (~${btc * df['close'].iloc[-1]:.2f})")
     print(f"Trades Executed: {len(trade_log)}")
 
-    if trade_log:
-        daily_trades = Counter(pd.to_datetime([t['timestamp'] for t in trade_log]).dt.date)
-        print("\nTrades per day:")
-        for day, count in sorted(daily_trades.items()):
-            print(f"{day}: {count}")
+    # if trade_log:
+    #     daily_trades = Counter(pd.to_datetime([t['timestamp'] for t in trade_log]).dt.date)
+    #     print("\nTrades per day:")
+    #     for day, count in sorted(daily_trades.items()):
+    #         print(f"{day}: {count}")
 
     if plot_equity and equity_curve:
         timestamps, values = zip(*equity_curve)
@@ -703,11 +703,6 @@ def safe_simulate_trading(
         'equity_curve': equity_curve
     }
 
-
-
-
-
-
 # Calculate average hourly price movement
 def analyze_volatility(df):
     df = df.copy()
@@ -724,7 +719,7 @@ def run_backtest1(best_params=None):
         # Fetch historical data
     df = crypto_bars(
         symbol='BTC/USD',
-        start_date="2024-01-01",
+        start_date="2025-01-01",
         end_date=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         limit=None,
         timeframe=TimeFrame.Hour
@@ -743,7 +738,7 @@ def run_backtest1(best_params=None):
     result = safe_simulate_trading(
     df=df,
     # 1000 hours took a long time to run, trying 500
-    window_size=1000,     
+    window_size=500,     
     # 6 is 4x predictions/day
     # stepping down to 3 to see if it helps with performance
     steps_ahead=3,
