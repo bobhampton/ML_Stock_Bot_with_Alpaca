@@ -1,2 +1,2 @@
-date,MAE,RMSE,model_path,train_start,train_end,train_days
-2025-03-30,1411.9949668549598,1511.9650552508201,models/lstm_MAE1411_RMSE1511_20250330.keras,2024-01-01,2025-03-29,454
+date,MAE,RMSE,model_path,train_start,train_end,train_days,trained_on
+2025-03-31,536.4508968904453,610.3520670462386,models/lstm_20240101-20250330_TRAINED_20250331.keras,2024-01-01,2025-03-30,455,2025-03-31

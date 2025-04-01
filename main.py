@@ -150,20 +150,35 @@ def check_missing_and_outliers(df):
     outliers = df[(df['close'] < Q1 - 1.5 * IQR) | (df['close'] > Q3 + 1.5 * IQR)]
     print(f"\nDetected {len(outliers)} potential outliers in closing prices.")
 
-def build_model_LSTM(input_shape, units=50, dropout=0.2):
-    regressor = Sequential()
-    regressor.add(Input(shape=input_shape))
-    regressor.add(LSTM(units, return_sequences=True))
-    regressor.add(Dropout(dropout))
-    regressor.add(LSTM(units, return_sequences=True))
-    regressor.add(Dropout(dropout))
-    regressor.add(LSTM(units, return_sequences=True))
-    regressor.add(Dropout(dropout))
-    regressor.add(LSTM(units))
-    regressor.add(Dropout(dropout))
-    regressor.add(Dense(units=1))
-    regressor.compile(optimizer='adam', loss='mean_squared_error')
-    return regressor
+# def build_model_LSTM(input_shape, units=50, dropout=0.2):
+#     regressor = Sequential()
+#     regressor.add(Input(shape=input_shape))
+#     regressor.add(LSTM(units, return_sequences=True))
+#     regressor.add(Dropout(dropout))
+#     regressor.add(LSTM(units, return_sequences=True))
+#     regressor.add(Dropout(dropout))
+#     regressor.add(LSTM(units, return_sequences=True))
+#     regressor.add(Dropout(dropout))
+#     regressor.add(LSTM(units))
+#     regressor.add(Dropout(dropout))
+#     regressor.add(Dense(units=1))
+#     regressor.compile(optimizer='adam', loss='mean_squared_error')
+#     return regressor
+
+def build_model_LSTM(input_shape=(60, 2), units=50, dropout=0.2):
+    model = Sequential()
+    model.add(Input(shape=input_shape))
+    model.add(LSTM(units, return_sequences=True))
+    model.add(Dropout(dropout))
+    model.add(LSTM(units, return_sequences=True))
+    model.add(Dropout(dropout))
+    model.add(LSTM(units))
+    model.add(Dropout(dropout))
+    model.add(Dense(units=1))
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    return model
+
+
 
 def prepare_LSTM_training_data(df, scaler=None):
     if 'close' not in df.columns:
@@ -212,9 +227,15 @@ def train_model_LSTM(X, y, input_shape=(60, 1), validation_split=0.1):
 def save_model(model, path='btc_lstm_model.keras'):
     model.save(path)
 
-def load_model_from_file(path='btc_lstm_model.keras'):
+# def load_model_from_file(path='btc_lstm_model.keras'):
     
-    return load_model(path)
+#     return load_model(path)
+
+def load_model_from_file(path='btc_lstm_model.keras'):
+    model = load_model(path)
+    print(f"Loaded model from: {path}")
+    model.summary()  # Output expected input shape
+    return model
 
 # Function to test and visualize the LSTM model's loss and predicted vs actual prices and
 def run_LSTM_test():
@@ -938,46 +959,68 @@ def predict_multi_step_with_uncertainty(model, scaler, initial_sequence, steps_a
 
     return mean_preds, std_preds
 
-def run_rolling_forecasts(start_date="2024-01-01", last_n_days=3, steps_ahead=24, model_dir='models', log_path='prediction_logs.csv'):
+def run_rolling_forecasts(start_date = '2024-01-01', last_n_days=3, steps_ahead=24, model_dir='models', log_path='prediction_logs.csv'):
     os.makedirs(model_dir, exist_ok=True)
 
-    # Roll back one day because current day won't have 24 hours of data
-    last_n_days = last_n_days + 1
+    # last_n_days = last_n_days - 1
 
     # Load full dataset
     df = crypto_bars('BTC/USD', start_date, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
     df = df.reset_index()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
-
-    # Determine last full day in data
     df['date'] = df['timestamp'].dt.date
+
     available_dates = sorted(df['date'].unique())
-    last_day = available_dates[-1]
-    forecast_dates = available_dates[-last_n_days:]
+    forecast_dates = []
+
+    for day in available_dates[-last_n_days - 1:]:
+        day_index = df[df['date'] == day].index.min()
+
+        if day_index is None:
+            continue
+
+        if day_index >= 60 and (day_index + steps_ahead) <= len(df):
+            forecast_dates.append(day)
+        else:
+            print(f"Skipping {day} - Not enough data for training/prediction.")
 
     logs = []
 
     for day in forecast_dates:
-        print(f"\nForecasting day: {day}")
+        print(f"Forecasting day: {day}")
         day_index = df[df['date'] == day].index.min()
-
-        # Ensure we have 60 back + 24 future hours of data
-        if day_index < 60 or day_index + steps_ahead > len(df):
-            print("Not enough data around this date. Skipping.")
-            continue
-
-        # Training set = everything before this day
         train_df = df.iloc[:day_index]
-
-        # Forecast target range
         future_df = df.iloc[day_index:day_index + steps_ahead]
 
-        # Prepare LSTM training
-        X_train, y_train, scaler = prepare_LSTM_training_data(train_df)
-        model, _ = train_model_LSTM(X_train, y_train)
+        # Calculate training range
+        train_start_dt = train_df['timestamp'].iloc[0]
+        train_end_dt = train_df['timestamp'].iloc[-1]
+        train_days = (train_end_dt - train_start_dt).days + 1
 
-        # Predict future 24 hours w/ MC dropout
+        train_start_str = train_start_dt.strftime('%Y%m%d')
+        train_end_str = train_end_dt.strftime('%Y%m%d')
+        trained_on_str = day.strftime('%Y%m%d')
+
+        # Including date range trained on and the date the model is trained allows us to update stale models when needed
+        model_filename = f"lstm_{train_start_str}-{train_end_str}_TRAINED_{trained_on_str}.keras"
+        model_path = os.path.join(model_dir, model_filename)
+
+        if os.path.exists(model_path):
+            print(f"Loading existing model from {model_path}")
+            model = load_model_from_file(model_path)
+            model_trained = True
+            # Just need the scaler for prediction
+            _, _, scaler = prepare_LSTM_training_data(train_df)
+        else:
+            print(f"Training new model: {model_filename}")
+            X_train, y_train, scaler = prepare_LSTM_training_data(train_df)
+            model, _ = train_model_LSTM(X_train, y_train)
+            model.save(model_path)
+            model_trained = False
+            print(f"Model saved to {model_path}")
+
+        # Prepare sequence for prediction
         last_seq = scaler.transform(train_df['close'].values[-60:].reshape(-1, 1))
         mean_preds, std_preds = predict_multi_step_with_uncertainty(
             model, scaler, last_seq, steps_ahead=steps_ahead, n_simulations=30
@@ -987,16 +1030,23 @@ def run_rolling_forecasts(start_date="2024-01-01", last_n_days=3, steps_ahead=24
         mae = mean_absolute_error(actual_prices, mean_preds)
         rmse = np.sqrt(mean_squared_error(actual_prices, mean_preds))
 
-        # Save model with version info
-        model_filename = f"lstm_MAE{int(mae)}_RMSE{int(rmse)}_{day.strftime('%Y%m%d')}.keras"
-        model_path = os.path.join(model_dir, model_filename)
-        model.save(model_path)
+        # Update filename with metrics if training just occurred
+        # if not os.path.exists(model_path.replace('.keras', f'_MAE{int(mae)}_RMSE{int(rmse)}.keras')):
+        #     print(f"Renaming model file with metrics: MAE={mae:.2f}, RMSE={rmse:.2f}")
+        #     train_start_str = train_start_dt.strftime('%Y%m%d')
+        #     train_end_str = train_end_dt.strftime('%Y%m%d')
+        #     trained_on_str = day.strftime('%Y%m%d')
+
+        #     updated_model_path = os.path.join(
+        #         model_dir,
+        #         f"lstm_MAE{int(mae)}_RMSE{int(rmse)}_{train_start_str}-{train_end_str}_TRAINED_{trained_on_str}.keras"
+        #     )
+        #     os.rename(model_path, updated_model_path)
+        #     model_path = updated_model_path
 
         # Plot forecast
         future_times = future_df['timestamp'].values
-        train_start = train_df['timestamp'].iloc[0].strftime('%Y-%m-%d')
-        train_end = train_df['timestamp'].iloc[-1].strftime('%Y-%m-%d')
-        train_range_str = f"Trained on: {train_start} → {train_end}"
+        train_range_str = f"Trained on: {train_start_dt.strftime('%Y-%m-%d')} → {train_end_dt.strftime('%Y-%m-%d')} (Duration: {train_days} days)"
 
         plt.figure(figsize=(12, 5))
         plt.plot(future_times, actual_prices, marker='o', label="Actual BTC Price", color='red')
@@ -1016,7 +1066,6 @@ def run_rolling_forecasts(start_date="2024-01-01", last_n_days=3, steps_ahead=24
         plt.grid(True)
         plt.legend()
 
-        # Add training range annotation to plot
         plt.gcf().text(
             0.5, 0.92, train_range_str, fontsize=9, ha='center', va='top',
             bbox=dict(facecolor='white', edgecolor='black', alpha=0.7)
@@ -1024,13 +1073,7 @@ def run_rolling_forecasts(start_date="2024-01-01", last_n_days=3, steps_ahead=24
 
         plt.tight_layout()
         plt.savefig(f"forecast_{day}.png")
-        plt.close('all')
-        print(f"Forecast plot saved for {day}.")
-
-
-        train_start_dt = train_df['timestamp'].iloc[0]
-        train_end_dt = train_df['timestamp'].iloc[-1]
-        train_days = (train_end_dt - train_start_dt).days + 1
+        plt.close()
 
         logs.append({
             'date': str(day),
@@ -1039,14 +1082,221 @@ def run_rolling_forecasts(start_date="2024-01-01", last_n_days=3, steps_ahead=24
             'model_path': model_path,
             'train_start': train_start_dt.strftime('%Y-%m-%d'),
             'train_end': train_end_dt.strftime('%Y-%m-%d'),
-            'train_days': train_days
+            'train_days': train_days,
+            'trained_on': day.strftime('%Y-%m-%d')
         })
 
-    # Save prediction log
+    # Save logs
     log_df = pd.DataFrame(logs)
     log_df.to_csv(log_path, index=False)
-    print(f"\nLogs saved to: {log_path}")
+    print(f"Logs saved to: {log_path}")
     print(log_df)
+
+def prepare_eod_training_data(df, scaler=None):
+    if 'close' not in df.columns or 'timestamp' not in df.columns:
+        raise ValueError("DataFrame must have 'close' and 'timestamp' columns.")
+
+    df = df.copy()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['hour'] = df['timestamp'].dt.hour
+    df['hour_norm'] = df['hour'] / 23.0
+    df['date'] = df['timestamp'].dt.date
+
+    X, y = [], []
+
+    all_dates = sorted(df['date'].unique())
+    for i in range(3, len(all_dates)):
+        day = all_dates[i]
+        day_rows = df[df['date'] == day]
+        if len(day_rows) < 24:
+            continue
+
+        end_of_day_price = day_rows['close'].iloc[-1]
+
+        history = df[df['timestamp'] < day_rows['timestamp'].iloc[0]].tail(60)
+        if len(history) < 60:
+            continue
+
+        X_close = history['close'].values.reshape(-1, 1)
+        X_hour = history['hour_norm'].values.reshape(-1, 1)
+        X_combined = np.hstack([X_close, X_hour])  # (60, 2)
+
+        X.append(X_combined)
+        y.append(end_of_day_price)
+
+    X = np.array(X)  # shape: (samples, 60, 2)
+    y = np.array(y).reshape(-1, 1)
+
+    if scaler is None:
+        scaler = MinMaxScaler()
+        X[:, :, 0] = scaler.fit_transform(X[:, :, 0])  # scale close only
+        y = scaler.transform(y)
+    else:
+        X[:, :, 0] = scaler.transform(X[:, :, 0])
+        y = scaler.transform(y)
+
+    return X, y, scaler
+
+def get_eod_scaler(df):
+    df = df.copy()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    data = df['close'].values.reshape(-1, 1)
+    scaler = MinMaxScaler()
+    scaler.fit(data)
+    return scaler
+
+
+def predict_eod_with_uncertainty(model, scaler, input_sequence, n_simulations=30):
+    if input_sequence.shape != (60, 2):
+        raise ValueError(f"[🛑 Invalid input] Expected shape (60, 2), got {input_sequence.shape}")
+    
+    reshaped_input = input_sequence.reshape(1, 60, 2)  # (1, 60, 2)
+    preds = []
+
+    for _ in range(n_simulations):
+        output = model(reshaped_input, training=True)
+        unscaled_output = scaler.inverse_transform(output)[0][0]
+        preds.append(unscaled_output)
+
+    return np.mean(preds), np.std(preds)
+
+
+
+def run_eod_forecasts(start_date='2024-01-01', last_n_days=5, model_dir='models', log_path='eod_prediction_logs.csv'):
+    os.makedirs(model_dir, exist_ok=True)
+
+    df = crypto_bars('BTC/USD', start_date, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
+    df = df.reset_index()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
+    df['date'] = df['timestamp'].dt.date
+
+    available_dates = sorted(df['date'].unique())
+    forecast_dates = []
+
+    for day in available_dates[-last_n_days:]:
+        day_rows = df[df['date'] == day]
+        if len(day_rows) < 24:
+            continue
+        prev_60 = df[df['timestamp'] < day_rows['timestamp'].iloc[0]].tail(60)
+        if len(prev_60) < 60:
+            continue
+        forecast_dates.append(day)
+
+    logs = []
+    all_dates = []
+    all_preds = []
+    all_actuals = []
+    all_stds = []
+
+    for day in forecast_dates:
+        print(f"Forecasting EOD for {day}")
+        day_rows = df[df['date'] == day]
+        train_df = df[df['timestamp'] < day_rows['timestamp'].iloc[0]]
+        future_df = day_rows
+
+        train_start_dt = train_df['timestamp'].iloc[0]
+        train_end_dt = train_df['timestamp'].iloc[-1]
+        train_days = (train_end_dt - train_start_dt).days + 1
+
+        train_start_str = train_start_dt.strftime('%Y%m%d')
+        train_end_str = train_end_dt.strftime('%Y%m%d')
+        trained_on_str = day.strftime('%Y%m%d')
+
+        model_filename = f"lstm_eod_{train_start_str}-{train_end_str}_TRAINED_{trained_on_str}.keras"
+        model_path = os.path.join(model_dir, model_filename)
+
+        if os.path.exists(model_path):
+            print(f"Loading existing model from {model_path}")
+            model = load_model_from_file(model_path)
+            # _, _, scaler = prepare_eod_training_data(train_df)
+            scaler = get_eod_scaler(train_df)
+
+        else:
+            print(f"Training new model for {day}")
+            X_train, y_train, scaler = prepare_eod_training_data(train_df)
+            model, _ = train_model_LSTM(X_train, y_train)
+            model.save(model_path)
+            print(f"Model saved to {model_path}")
+
+        # Build the input sequence for prediction (60 past hours, close + hour_norm)
+        last_60 = train_df.tail(60).copy()
+        last_60['hour'] = last_60['timestamp'].dt.hour
+        last_60['hour_norm'] = last_60['hour'] / 23.0
+
+        X_close = last_60['close'].values.reshape(-1, 1)
+        X_hour = last_60['hour_norm'].values.reshape(-1, 1)
+        X_combined = np.hstack([X_close, X_hour])
+        X_combined[:, 0] = scaler.transform(X_combined[:, 0].reshape(-1, 1)).flatten()
+
+        assert X_combined.shape == (60, 2), f"Bad shape: {X_combined.shape}"
+        print(f"DEBUG input shape to model: {X_combined.shape}")
+        print(f"First row: {X_combined[0]}")  # Confirm values look right
+
+        mean_pred, std_pred = predict_eod_with_uncertainty(model, scaler, X_combined, n_simulations=30)
+        actual_price = future_df['close'].iloc[-1]
+
+        mae = mean_absolute_error([actual_price], [mean_pred])
+        rmse = np.sqrt(mean_squared_error([actual_price], [mean_pred]))
+
+        logs.append({
+            'date': str(day),
+            'MAE': mae,
+            'RMSE': rmse,
+            'model_path': model_path,
+            'train_start': train_start_dt.strftime('%Y-%m-%d'),
+            'train_end': train_end_dt.strftime('%Y-%m-%d'),
+            'train_days': train_days,
+            'trained_on': day.strftime('%Y-%m-%d')
+        })
+
+        # Store for combined plotting
+        all_dates.append(day)
+        all_preds.append(mean_pred)
+        all_actuals.append(actual_price)
+        all_stds.append(std_pred)
+
+    # Save log
+    log_df = pd.DataFrame(logs)
+    log_df.to_csv(log_path, index=False)
+    print(f"Logs saved to: {log_path}")
+    print(log_df)
+
+    # Plot MAE trend
+    mae_series = log_df[['date', 'MAE']].copy()
+    mae_series['date'] = pd.to_datetime(mae_series['date'])
+
+    plt.figure(figsize=(10, 3.5))
+    plt.plot(mae_series['date'], mae_series['MAE'], marker='o', color='purple')
+    plt.title("MAE Over Time (EOD Forecasts)")
+    plt.xlabel("Date")
+    plt.ylabel("Mean Absolute Error (USD)")
+    plt.grid(True)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig("eod_mae_over_time.png")
+    plt.close()
+
+    # Plot combined predictions vs actual
+    if all_dates:
+        all_dates = pd.to_datetime(all_dates)
+
+        plt.figure(figsize=(12, 6))
+        plt.plot(all_dates, all_actuals, label="Actual EOD", color="red", marker='o')
+        plt.errorbar(all_dates, all_preds, yerr=np.array(all_stds) * 2, fmt='o', color='blue', capsize=5, label="Predicted EOD ±95% CI")
+        plt.title(f"BTC EOD Forecasts (Last {len(all_dates)} Days)")
+        plt.xlabel("Date")
+        plt.ylabel("BTC Price (USD)")
+        plt.xticks(rotation=45)
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig("eod_forecast_summary.png")
+        plt.show(block=False)
+        plt.pause(3)
+        plt.close('all')
+
+
 
 def main():
     # Load best Optuna params (optional if not using optimized)
@@ -1067,7 +1317,8 @@ def main():
 
     # run_multi_step_test(load_if_exists=False)
     set_random_seed(42)
-    run_rolling_forecasts("2024-01-01", last_n_days=1, training=True)
+    # run_rolling_forecasts("2024-01-01", last_n_days=1)
+    run_eod_forecasts("2024-01-01", last_n_days=10)
 
 
 if __name__ == "__main__":
