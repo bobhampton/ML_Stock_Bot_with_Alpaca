@@ -1598,6 +1598,15 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
 
         portfolio_values.append(total_value)
 
+        print(f"\nDate: {curr_day}")
+        print(f"  Prediction: {mean_pred:.2f} ± {std_pred:.2f}")
+        print(f"  Previous EOD: {actual_prev_eod:.2f}")
+        print(f"  Cumulative Predicted Δ (next {lookahead_days} days): {predicted_cum_delta:.2f}")
+        print(f"  Decision: {decision}")
+        print(f"  Cash: ${cash:,.2f} | BTC: {btc:.4f} | Portfolio Value: ${total_value:,.2f}")
+        if decision == "HOLD" and std_pred > dynamic_std_limit:
+            print(f"  Skipping trade: std {std_pred:.2f} > limit {dynamic_std_limit:.2f}")
+
     print("\nSimulation Complete")
     print(f"Final Portfolio Value: ${portfolio_values[-1]:,.2f}")
     print(f"Total Trades: {sum(1 for t in trade_log if t['decision'] != 'HOLD')}")
