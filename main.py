@@ -34,6 +34,7 @@ from alpaca.trading.enums import AssetClass, OrderSide, OrderType, OrderClass, T
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from collections import Counter
 from pathlib import Path
+from sklearn.preprocessing import StandardScaler
 
 # Setup logging
 logging.basicConfig(
@@ -1075,57 +1076,42 @@ def run_rolling_forecasts(start_date = '2024-01-01', last_n_days=3, steps_ahead=
     print(f"Logs saved to: {log_path}")
     print(log_df)
 
-def prepare_eod_training_data_hybrid(df, x_scaler=None, y_scaler=None, lookback=120):
-    df = add_technical_indicators(df)
-    df['date'] = df['timestamp'].dt.date
+def prepare_eod_training_data_hybrid(df, lookback=120):
+    df = df.copy()
+    df['log_return'] = np.log(df['close'].shift(-1) / df['close'])
+    df['target'] = df['log_return'] * 100  # <- Scale return
+
+    # Feature engineering
+    df['ma_20'] = df['close'].rolling(20).mean()
+    df['ma_ratio'] = df['close'] / df['ma_20']
+    df['volatility_20'] = df['close'].rolling(20).std()
+    df['daily_range'] = (df['high'] - df['low']) / df['close']
+    df['body_size'] = abs(df['close'] - df['open']) / df['close']
 
     feature_cols = [
         'close', 'rsi', 'bb_width', 'volume_scaled',
         'macd_line', 'macd_signal', 'macd_hist',
-        'obv', 'stoch_k', 'stoch_d', 'adx', 'cci'
+        'obv', 'stoch_k', 'stoch_d', 'adx', 'cci',
+        'ma_ratio', 'volatility_20', 'daily_range', 'body_size'
     ]
 
-
-    df = df.dropna(subset=feature_cols)
+    df = df.dropna(subset=feature_cols + ['target'])
 
     X, y = [], []
-    all_dates = sorted(df['date'].unique())
+    for i in range(lookback, len(df)):
+        X.append(df.iloc[i - lookback:i][feature_cols].values)
+        y.append(df.iloc[i]['target'])
 
-    for i in range(3, len(all_dates)):
-        day = all_dates[i]
-        day_data = df[df['date'] == day]
-        if len(day_data) < 24:
-            continue
+    X = np.array(X)
+    y = np.array(y)
 
-        end_of_day_price = day_data['close'].iloc[-1]
-        hist = df[df['timestamp'] < day_data['timestamp'].iloc[0]].tail(lookback)
+    x_scaler = StandardScaler()
+    y_scaler = StandardScaler()
 
-        if len(hist) < lookback:
-            continue
+    X_scaled = np.array([x_scaler.fit_transform(x) for x in X])
+    y_scaled = y_scaler.fit_transform(y.reshape(-1, 1)).ravel()
 
-        seq = hist[feature_cols].values  # shape: (lookback, features)
-        X.append(seq)
-        y.append(end_of_day_price)
-
-    X = np.array(X)  # (samples, lookback, features)
-    y = np.array(y).reshape(-1, 1)
-
-    if x_scaler is None:
-        x_scaler = MinMaxScaler()
-        X_shape = X.shape
-        X = x_scaler.fit_transform(X.reshape(-1, X_shape[2])).reshape(X_shape)
-    else:
-        X_shape = X.shape
-        X = x_scaler.transform(X.reshape(-1, X_shape[2])).reshape(X_shape)
-
-    if y_scaler is None:
-        y_scaler = MinMaxScaler()
-        y = y_scaler.fit_transform(y)
-    else:
-        y = y_scaler.transform(y)
-
-    return X, y, x_scaler, y_scaler
-
+    return X_scaled, y_scaled, x_scaler, y_scaler
 
 
 def build_hybrid_LSTM_model(input_shape, units=64, dropout=0.2):
@@ -1452,49 +1438,77 @@ def evaluate_hybrid_model_on_holdout(df, lookback=120):
 
     return mae, rmse
 
-def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.01, 
-                                    cooldown_days=2, lookahead_days=3):
+def extract_high_volatility_window(df, window_size=20, top_pct=0.3):
+    df = df.copy()
+    df['rolling_vol'] = df['close'].rolling(window=window_size).std()
+    df = df.dropna()
 
+    threshold = df['rolling_vol'].quantile(1 - top_pct)
+    high_vol_df = df[df['rolling_vol'] >= threshold]
+    
+    return high_vol_df
+
+def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.01, 
+                                    cooldown_days=2, lookahead_days=3, model_dir="models"):
+    os.makedirs(model_dir, exist_ok=True)
     df = add_technical_indicators(df)
     df['date'] = df['timestamp'].dt.date
+
+    # Feature engineering
+    df['log_return'] = np.log(df['close'].shift(-1) / df['close'])
+    df['target'] = df['log_return'] * 100
+
+    df['ma_20'] = df['close'].rolling(20).mean()
+    df['ma_ratio'] = df['close'] / df['ma_20']
+    df['volatility_20'] = df['close'].rolling(20).std()
+    df['daily_range'] = (df['high'] - df['low']) / df['close']
+    df['body_size'] = abs(df['close'] - df['open']) / df['close']
 
     feature_cols = [
         'close', 'rsi', 'bb_width', 'volume_scaled',
         'macd_line', 'macd_signal', 'macd_hist',
-        'obv', 'stoch_k', 'stoch_d', 'adx', 'cci'
+        'obv', 'stoch_k', 'stoch_d', 'adx', 'cci',
+        'ma_ratio', 'volatility_20', 'daily_range', 'body_size'
     ]
 
-    df = df.dropna(subset=feature_cols)
+    df = df.dropna(subset=feature_cols + ['target'])
     all_dates = sorted(df['date'].unique())
 
-    # 80/20 split
     split_idx = int(len(all_dates) * 0.8)
     train_dates = all_dates[:split_idx]
     test_dates = all_dates[split_idx:]
 
     train_df = df[df['date'].isin(train_dates)]
+    train_df = extract_high_volatility_window(train_df)
+
     test_df = df[df['date'].isin(test_dates)]
 
-    # Estimate volatility from train set
+    # Volatility stats
     train_eod = train_df.groupby('date')['close'].last()
     daily_deltas = train_eod.diff().dropna()
     delta_mean = daily_deltas.abs().mean()
     delta_std = daily_deltas.abs().std()
     print(f"Estimated EOD Delta Mean: {delta_mean:.2f} | Std Dev: {delta_std:.2f}")
 
-    dynamic_threshold = delta_mean + delta_std
-    print(f"Using dynamic trade threshold: {dynamic_threshold:.2f}")
-
-    # Train hybrid model
-    X_train, y_train, x_scaler, y_scaler = prepare_eod_training_data_hybrid(train_df, lookback=lookback)
+    # Save/load model
+    model_name = f"hybrid_{train_dates[0]}_{train_dates[-1]}.keras"
+    model_path = os.path.join(model_dir, model_name)
+    X_train, y_train, x_scaler, y_scaler = prepare_eod_training_data_hybrid(train_df, lookback)
     input_shape = (X_train.shape[1], X_train.shape[2])
-    model = build_hybrid_LSTM_model(input_shape)
-    model.fit(X_train, y_train, epochs=100, batch_size=32, validation_split=0.1, verbose=0)
 
-    cash = initial_cash
-    btc = 0
-    trade_log = []
-    portfolio_values = []
+    if os.path.exists(model_path):
+        print(f"[MODEL] Loading cached model from {model_path}")
+        model = load_model_from_file(model_path)
+    else:
+        print(f"[MODEL] Training new model → {model_path}")
+        model = build_hybrid_LSTM_model(input_shape)
+        model.fit(X_train, y_train, epochs=100, batch_size=32, validation_split=0.1, verbose=0)
+        model.save(model_path)
+        print(f"[MODEL] Saved to {model_path}")
+
+    cash, btc_available, btc_locked_hodl = initial_cash, 0.0, 0.0
+    active_trades = []
+    trade_log, portfolio_values = [], []
     last_buy_date = None
     std_history = []
     rolling_window = 5
@@ -1518,14 +1532,14 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
         input_scaled = x_scaler.transform(input_seq).reshape(1, lookback, len(feature_cols))
         mean_pred, std_pred = predict_eod_with_uncertainty(model, y_scaler, input_seq, n_simulations=30)
 
-        std_history.append(std_pred)
-        if len(std_history) >= rolling_window:
-            dynamic_std_limit = max(np.mean(std_history[-rolling_window:]) * 1.25, dynamic_std_limit_min)
-        else:
-            dynamic_std_limit = float('inf')
+        predicted_log_return = mean_pred / 100
+        predicted_price = actual_today_eod * np.exp(predicted_log_return)
 
-        # Predict cumulative delta
-        predicted_cum = [mean_pred]
+        std_history.append(std_pred)
+        dynamic_std_limit = max(np.mean(std_history[-rolling_window:]) * 1.25, dynamic_std_limit_min) \
+            if len(std_history) >= rolling_window else float('inf')
+
+        predicted_cum = [predicted_price]
         future_hist = hist.copy()
         future_dates = test_dates[i+1:i+1+lookahead_days]
         for f_day in future_dates:
@@ -1538,47 +1552,74 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
             f_input = future_hist[feature_cols].values
             f_input_scaled = x_scaler.transform(f_input).reshape(1, lookback, len(feature_cols))
             f_pred, _ = predict_eod_with_uncertainty(model, y_scaler, f_input, n_simulations=30)
-            predicted_cum.append(f_pred)
+            f_price = actual_today_eod * np.exp(f_pred / 100)
+            predicted_cum.append(f_price)
 
         predicted_cum_delta = predicted_cum[-1] - actual_today_eod
 
+        # Dynamic thresholds
+        buy_threshold = delta_mean * 0.005
+        sell_threshold = -delta_mean * 0.5
+
         decision = "HOLD"
-        can_trade = True
-        if last_buy_date and (curr_day - last_buy_date).days < cooldown_days:
-            can_trade = False
+        can_trade = not last_buy_date or (curr_day - last_buy_date).days >= cooldown_days
+
+        print(f"BUY CHECK: Δ={predicted_cum_delta:.2f} vs Threshold={buy_threshold:.2f}")
+        print(f"Cash: ${cash:,.2f}, Required: ${actual_today_eod * qty:,.2f}")
+        print(f"Can Trade: {can_trade}")
+
+        for trade in active_trades:
+            if not trade['sold'] and (curr_day - trade['buy_date']).days == 1:
+                if actual_today_eod > trade['buy_price']:
+                    sell_qty = trade['buy_qty'] * 0.5
+                    if btc_available >= sell_qty:
+                        btc_available -= sell_qty
+                        cash += actual_today_eod * sell_qty
+                        trade['sold'] = True
+                        decision = "PARTIAL SELL"
 
         if std_pred <= dynamic_std_limit and can_trade:
-            if predicted_cum_delta >= dynamic_threshold and cash >= actual_today_eod * qty:
-                btc += qty
+            if predicted_cum_delta >= buy_threshold and cash >= actual_today_eod * qty:
+                btc_available += qty * 0.5
+                btc_locked_hodl += qty * 0.5
                 cash -= actual_today_eod * qty
                 decision = "BUY"
                 last_buy_date = curr_day
-            elif predicted_cum_delta <= -dynamic_threshold and btc >= qty:
-                btc -= qty
+                active_trades.append({
+                    'buy_date': curr_day,
+                    'buy_price': actual_today_eod,
+                    'buy_qty': qty,
+                    'sold': False
+                })
+            elif predicted_cum_delta <= sell_threshold and btc_available >= qty:
+                btc_available -= qty
                 cash += actual_today_eod * qty
                 decision = "SELL"
 
-        total_value = cash + btc * actual_today_eod
+        total_btc = btc_available + btc_locked_hodl
+        total_value = cash + total_btc * actual_today_eod
         trade_log.append({
             'date': str(curr_day),
             'actual_eod': actual_today_eod,
-            'predicted_eod': mean_pred,
+            'predicted_eod': predicted_price,
             'pred_std': std_pred,
             'prev_eod': actual_prev_eod,
             'decision': decision,
             'cash': cash,
-            'btc': btc,
+            'btc_available': btc_available,
+            'btc_locked': btc_locked_hodl,
+            'btc_total': total_btc,
             'portfolio_value': total_value
         })
 
         portfolio_values.append(total_value)
 
         print(f"\nDate: {curr_day}")
-        print(f"  Prediction: {mean_pred:.2f} ± {std_pred:.2f}")
+        print(f"  Prediction: {predicted_price:.2f} ± {std_pred:.2f}")
         print(f"  Previous EOD: {actual_prev_eod:.2f}")
         print(f"  Cumulative Predicted Δ (next {lookahead_days} days): {predicted_cum_delta:.2f}")
         print(f"  Decision: {decision}")
-        print(f"  Cash: ${cash:,.2f} | BTC: {btc:.4f} | Portfolio Value: ${total_value:,.2f}")
+        print(f"  Cash: ${cash:,.2f} | BTC Available: {btc_available:.4f} | HODL BTC: {btc_locked_hodl:.4f} | Portfolio Value: ${total_value:,.2f}")
         if decision == "HOLD" and std_pred > dynamic_std_limit:
             print(f"  Skipping trade: std {std_pred:.2f} > limit {dynamic_std_limit:.2f}")
 
@@ -1586,10 +1627,9 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     print(f"Final Portfolio Value: ${portfolio_values[-1]:,.2f}")
     print(f"Total Trades: {sum(1 for t in trade_log if t['decision'] != 'HOLD')}")
 
-    # Save trade log
-    trade_log_df = pd.DataFrame(trade_log)
-    trade_log_df.to_csv('trade_log.csv', index=False)
+    pd.DataFrame(trade_log).to_csv('trade_log.csv', index=False)
     print("Trade log saved to trade_log.csv")
+
     # Plot actual vs predicted EOD prices
     plt.figure(figsize=(12, 6))
     plt.plot(pd.to_datetime([t['date'] for t in trade_log]), [t['actual_eod'] for t in trade_log], label="Actual EOD", color='red', marker='o')
@@ -1612,7 +1652,7 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     plt.show(block=False)
     plt.pause(3)
     plt.close('all')
-    
+
     # Plot portfolio value over time
     plt.figure(figsize=(12, 6))
     plt.plot(pd.to_datetime([t['date'] for t in trade_log]), portfolio_values, label="Portfolio Value", color='blue')
@@ -1626,9 +1666,9 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     plt.show(block=False)
     plt.pause(3)
     plt.close('all')
-    
 
     return trade_log
+
 
 
 
@@ -1658,7 +1698,7 @@ def main():
     # run_eod_forecasts("2024-01-01", last_n_days=10)
 
     # Load historical BTC data
-    df = crypto_bars('BTC/USD', "2024-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
+    df = crypto_bars('BTC/USD', "2023-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
     df = df.reset_index()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
