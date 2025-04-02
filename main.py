@@ -1,7 +1,8 @@
+# this one did better, but never sold
+
 from datetime import datetime, timedelta, timezone
 import random
 import time
-import hashlib
 import os
 import numpy as np
 import logging
@@ -1125,6 +1126,8 @@ def prepare_eod_training_data_hybrid(df, x_scaler=None, y_scaler=None, lookback=
 
     return X, y, x_scaler, y_scaler
 
+
+
 def build_hybrid_LSTM_model(input_shape, units=64, dropout=0.2):
     model = Sequential()
     model.add(Input(shape=input_shape))  # (lookback, features)
@@ -1163,6 +1166,7 @@ def predict_eod_with_uncertainty(model, scaler, input_sequence, n_simulations=30
         predicted = scaler.inverse_transform(predicted_scaled)[0][0]
         preds.append(predicted)
     return np.mean(preds), np.std(preds)
+
 
 def run_eod_forecasts(start_date='2024-01-01', last_n_days=5, model_dir='models', log_path='eod_prediction_logs.csv'):
     os.makedirs(model_dir, exist_ok=True)
@@ -1449,11 +1453,7 @@ def evaluate_hybrid_model_on_holdout(df, lookback=120):
     return mae, rmse
 
 def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.01, 
-                                    cooldown_days=2, lookahead_days=3, model_dir="models",
-                                    model_config={"units": 64, "dropout": 0.2},
-                                    retrain_daily=False, force_retrain=False):
-
-    os.makedirs(model_dir, exist_ok=True)
+                                    cooldown_days=2, lookahead_days=3):
 
     df = add_technical_indicators(df)
     df['date'] = df['timestamp'].dt.date
@@ -1467,75 +1467,53 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     df = df.dropna(subset=feature_cols)
     all_dates = sorted(df['date'].unique())
 
+    # 80/20 split
     split_idx = int(len(all_dates) * 0.8)
+    train_dates = all_dates[:split_idx]
     test_dates = all_dates[split_idx:]
 
-    train_eod = df[df['date'].isin(all_dates[:split_idx])].groupby('date')['close'].last()
+    train_df = df[df['date'].isin(train_dates)]
+    test_df = df[df['date'].isin(test_dates)]
+
+    # Estimate volatility from train set
+    train_eod = train_df.groupby('date')['close'].last()
     daily_deltas = train_eod.diff().dropna()
     delta_mean = daily_deltas.abs().mean()
     delta_std = daily_deltas.abs().std()
-    dynamic_threshold = delta_mean + delta_std
-
     print(f"Estimated EOD Delta Mean: {delta_mean:.2f} | Std Dev: {delta_std:.2f}")
+
+    dynamic_threshold = delta_mean + delta_std
     print(f"Using dynamic trade threshold: {dynamic_threshold:.2f}")
+
+    # Train hybrid model
+    X_train, y_train, x_scaler, y_scaler = prepare_eod_training_data_hybrid(train_df, lookback=lookback)
+    input_shape = (X_train.shape[1], X_train.shape[2])
+    model = build_hybrid_LSTM_model(input_shape)
+    model.fit(X_train, y_train, epochs=100, batch_size=32, validation_split=0.1, verbose=0)
 
     cash = initial_cash
     btc = 0
     trade_log = []
     portfolio_values = []
+    last_buy_date = None
     std_history = []
     rolling_window = 5
     dynamic_std_limit_min = 2000
 
-    buy_dates = []
-    sell_dates = []
-    buy_prices = []
-    sell_prices = []
-
     for i in range(1, len(test_dates)):
         prev_day = test_dates[i - 1]
         curr_day = test_dates[i]
+
+        prev_data = df[df['date'] == prev_day]
         curr_data = df[df['date'] == curr_day]
-        if len(curr_data) < 24:
+        hist = df[df['timestamp'] < curr_data['timestamp'].iloc[0]].tail(lookback)
+
+        if len(hist) < lookback or len(prev_data) < 24 or len(curr_data) < 24:
             continue
 
-        actual_prev_eod = df[df['date'] == prev_day]['close'].iloc[-1]
+        actual_prev_eod = prev_data['close'].iloc[-1]
         actual_today_eod = curr_data['close'].iloc[-1]
 
-        updated_train_df = df[df['timestamp'] < curr_data['timestamp'].iloc[0]]
-        if len(updated_train_df) < lookback * 2:
-            print(f"Skipping {curr_day}: Not enough training data.")
-            continue
-
-        train_start_dt = updated_train_df['timestamp'].iloc[0]
-        train_end_dt = updated_train_df['timestamp'].iloc[-1]
-
-        hash_input = f"{lookback}_{feature_cols}_{model_config}_{train_start_dt}_{train_end_dt}"
-        model_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16]
-        model_filename = f"lstm_{model_hash}.keras"
-        model_path = os.path.join(model_dir, model_filename)
-
-        retrain_condition = retrain_daily or force_retrain or not os.path.exists(model_path)
-
-        if retrain_condition:
-            print(f"[{curr_day}] Training model (reason: {'forced' if force_retrain else 'daily' if retrain_daily else 'missing'})")
-            try:
-                X_train, y_train, x_scaler, y_scaler = prepare_eod_training_data_hybrid(updated_train_df, lookback=lookback)
-            except Exception as e:
-                print(f"[{curr_day}] Training prep error: {e}")
-                continue
-
-            input_shape = (X_train.shape[1], X_train.shape[2])
-            model = build_hybrid_LSTM_model(input_shape, **model_config)
-            model.fit(X_train, y_train, epochs=100, batch_size=32, validation_split=0.1, verbose=0)
-            model.save(model_path)
-            print(f"[{curr_day}] Saved model to {model_path}")
-        else:
-            print(f"[{curr_day}] Loading model from cache: {model_path}")
-            model = load_model_from_file(model_path)
-            _, _, x_scaler, y_scaler = prepare_eod_training_data_hybrid(updated_train_df, lookback=lookback)
-
-        hist = updated_train_df.tail(lookback)
         input_seq = hist[feature_cols].values
         input_scaled = x_scaler.transform(input_seq).reshape(1, lookback, len(feature_cols))
         mean_pred, std_pred = predict_eod_with_uncertainty(model, y_scaler, input_seq, n_simulations=30)
@@ -1546,6 +1524,7 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
         else:
             dynamic_std_limit = float('inf')
 
+        # Predict cumulative delta
         predicted_cum = [mean_pred]
         future_hist = hist.copy()
         future_dates = test_dates[i+1:i+1+lookahead_days]
@@ -1562,24 +1541,22 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
             predicted_cum.append(f_pred)
 
         predicted_cum_delta = predicted_cum[-1] - actual_today_eod
-        decision = "HOLD"
-        qty_scaled = qty
 
-        if std_pred <= dynamic_std_limit:
-            confidence = 1 - (std_pred / dynamic_std_limit)
-            qty_scaled = qty * confidence
-            if predicted_cum_delta >= dynamic_threshold and cash >= actual_today_eod * qty_scaled:
-                btc += qty_scaled
-                cash -= actual_today_eod * qty_scaled
+        decision = "HOLD"
+        can_trade = True
+        if last_buy_date and (curr_day - last_buy_date).days < cooldown_days:
+            can_trade = False
+
+        if std_pred <= dynamic_std_limit and can_trade:
+            if predicted_cum_delta >= dynamic_threshold and cash >= actual_today_eod * qty:
+                btc += qty
+                cash -= actual_today_eod * qty
                 decision = "BUY"
-                buy_dates.append(curr_day)
-                buy_prices.append(actual_today_eod)
-            elif predicted_cum_delta <= -dynamic_threshold and btc >= qty_scaled:
-                btc -= qty_scaled
-                cash += actual_today_eod * qty_scaled
+                last_buy_date = curr_day
+            elif predicted_cum_delta <= -dynamic_threshold and btc >= qty:
+                btc -= qty
+                cash += actual_today_eod * qty
                 decision = "SELL"
-                sell_dates.append(curr_day)
-                sell_prices.append(actual_today_eod)
 
         total_value = cash + btc * actual_today_eod
         trade_log.append({
@@ -1589,8 +1566,6 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
             'pred_std': std_pred,
             'prev_eod': actual_prev_eod,
             'decision': decision,
-            'confidence': confidence if std_pred <= dynamic_std_limit else 0,
-            'qty_scaled': qty_scaled if std_pred <= dynamic_std_limit else 0,
             'cash': cash,
             'btc': btc,
             'portfolio_value': total_value
@@ -1611,50 +1586,53 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     print(f"Final Portfolio Value: ${portfolio_values[-1]:,.2f}")
     print(f"Total Trades: {sum(1 for t in trade_log if t['decision'] != 'HOLD')}")
 
-    pd.DataFrame(trade_log).to_csv("eod_trade_log.csv", index=False)
-
-    all_dates_eval = pd.to_datetime([row['date'] for row in trade_log])
-    all_actuals = [row['actual_eod'] for row in trade_log]
-    all_preds = [row['predicted_eod'] for row in trade_log]
-    all_stds = [row['pred_std'] for row in trade_log]
-
+    # Save trade log
+    trade_log_df = pd.DataFrame(trade_log)
+    trade_log_df.to_csv('trade_log.csv', index=False)
+    print("Trade log saved to trade_log.csv")
+    # Plot actual vs predicted EOD prices
     plt.figure(figsize=(12, 6))
-    plt.plot(all_dates_eval, all_actuals, color='red', label="Actual EOD")
-    plt.plot(all_dates_eval, all_preds, color='blue', label="Predicted EOD")
+    plt.plot(pd.to_datetime([t['date'] for t in trade_log]), [t['actual_eod'] for t in trade_log], label="Actual EOD", color='red', marker='o')
+    plt.plot(pd.to_datetime([t['date'] for t in trade_log]), [t['predicted_eod'] for t in trade_log], label="Predicted EOD", color='blue', marker='o')
     plt.fill_between(
-        all_dates_eval,
-        np.array(all_preds) - 2 * np.array(all_stds),
-        np.array(all_preds) + 2 * np.array(all_stds),
-        color='blue', alpha=0.2, label="±95% CI"
+        pd.to_datetime([t['date'] for t in trade_log]),
+        [t['predicted_eod'] - t['pred_std'] for t in trade_log],
+        [t['predicted_eod'] + t['pred_std'] for t in trade_log],
+        color='blue', alpha=0.2,
+        label="95% Confidence Interval"
     )
-    plt.scatter(pd.to_datetime(buy_dates), buy_prices, marker='^', color='green', label='Buy Signal', zorder=5)
-    plt.scatter(pd.to_datetime(sell_dates), sell_prices, marker='v', color='red', label='Sell Signal', zorder=5)
-    plt.legend()
-    plt.title("Hybrid LSTM EOD Forecasts with Daily Retraining")
+    plt.title("BTC EOD Prediction with Hybrid LSTM")
     plt.xlabel("Date")
     plt.ylabel("BTC Price (USD)")
     plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig("eod_forecast_prediction.png")
-    plt.show(block=False)
-    plt.pause(5)
-    plt.close('all')
-
-    plt.figure(figsize=(12, 6))
-    plt.plot(all_dates_eval, portfolio_values, color='green', linestyle='-', label="Portfolio Value")
-    plt.title("Simulated Portfolio Value Over Time")
-    plt.xlabel("Date")
-    plt.ylabel("USD")
-    plt.xticks(rotation=45)
     plt.grid(True)
-    plt.tight_layout()
     plt.legend()
-    plt.savefig("eod_portfolio_value.png")
+    plt.tight_layout()
+    plt.savefig("eod_prediction.png")
     plt.show(block=False)
-    plt.pause(5)
+    plt.pause(3)
     plt.close('all')
+    
+    # Plot portfolio value over time
+    plt.figure(figsize=(12, 6))
+    plt.plot(pd.to_datetime([t['date'] for t in trade_log]), portfolio_values, label="Portfolio Value", color='blue')
+    plt.title("Portfolio Value Over Time")
+    plt.xlabel("Date")
+    plt.ylabel("Portfolio Value (USD)")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("portfolio_value_over_time.png")
+    plt.show(block=False)
+    plt.pause(3)
+    plt.close('all')
+    
 
     return trade_log
+
+
+
+
 
 
 def main():
@@ -1733,8 +1711,7 @@ def main():
     #     qty=0.001
     # )
 
-    simulate_eod_trading_on_holdout(df, retrain_daily=False)
-
+    simulate_eod_trading_on_holdout(df)
 
 
 
