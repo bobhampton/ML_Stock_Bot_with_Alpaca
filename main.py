@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import random
 import time
+import hashlib
 import os
 import numpy as np
 import logging
@@ -8,6 +9,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import run_test
 import optuna
+import ta
 import tensorflow as tf
 import json
 from dotenv import load_dotenv
@@ -150,35 +152,20 @@ def check_missing_and_outliers(df):
     outliers = df[(df['close'] < Q1 - 1.5 * IQR) | (df['close'] > Q3 + 1.5 * IQR)]
     print(f"\nDetected {len(outliers)} potential outliers in closing prices.")
 
-# def build_model_LSTM(input_shape, units=50, dropout=0.2):
-#     regressor = Sequential()
-#     regressor.add(Input(shape=input_shape))
-#     regressor.add(LSTM(units, return_sequences=True))
-#     regressor.add(Dropout(dropout))
-#     regressor.add(LSTM(units, return_sequences=True))
-#     regressor.add(Dropout(dropout))
-#     regressor.add(LSTM(units, return_sequences=True))
-#     regressor.add(Dropout(dropout))
-#     regressor.add(LSTM(units))
-#     regressor.add(Dropout(dropout))
-#     regressor.add(Dense(units=1))
-#     regressor.compile(optimizer='adam', loss='mean_squared_error')
-#     return regressor
-
-def build_model_LSTM(input_shape=(60, 2), units=50, dropout=0.2):
-    model = Sequential()
-    model.add(Input(shape=input_shape))
-    model.add(LSTM(units, return_sequences=True))
-    model.add(Dropout(dropout))
-    model.add(LSTM(units, return_sequences=True))
-    model.add(Dropout(dropout))
-    model.add(LSTM(units))
-    model.add(Dropout(dropout))
-    model.add(Dense(units=1))
-    model.compile(optimizer='adam', loss='mean_squared_error')
-    return model
-
-
+def build_model_LSTM(input_shape, units=50, dropout=0.2):
+    regressor = Sequential()
+    regressor.add(Input(shape=input_shape))
+    regressor.add(LSTM(units, return_sequences=True))
+    regressor.add(Dropout(dropout))
+    regressor.add(LSTM(units, return_sequences=True))
+    regressor.add(Dropout(dropout))
+    regressor.add(LSTM(units, return_sequences=True))
+    regressor.add(Dropout(dropout))
+    regressor.add(LSTM(units))
+    regressor.add(Dropout(dropout))
+    regressor.add(Dense(units=1))
+    regressor.compile(optimizer='adam', loss='mean_squared_error')
+    return regressor
 
 def prepare_LSTM_training_data(df, scaler=None):
     if 'close' not in df.columns:
@@ -203,7 +190,8 @@ def prepare_LSTM_training_data(df, scaler=None):
     return X, y, scaler
 
 # Modified code from <https://www.simplilearn.com/tutorials/machine-learning-tutorial/stock-price-prediction-using-machine-learning>
-def train_model_LSTM(X, y, input_shape=(60, 1), validation_split=0.1):
+# def train_model_LSTM(X, y, input_shape=(60, 1), validation_split=0.1):
+def train_model_LSTM(X, y, input_shape=(120, 1), validation_split=0.1):
     model = build_model_LSTM(input_shape)
 
     early_stop = EarlyStopping(
@@ -227,15 +215,9 @@ def train_model_LSTM(X, y, input_shape=(60, 1), validation_split=0.1):
 def save_model(model, path='btc_lstm_model.keras'):
     model.save(path)
 
-# def load_model_from_file(path='btc_lstm_model.keras'):
-    
-#     return load_model(path)
-
 def load_model_from_file(path='btc_lstm_model.keras'):
-    model = load_model(path)
-    print(f"Loaded model from: {path}")
-    model.summary()  # Output expected input shape
-    return model
+    
+    return load_model(path)
 
 # Function to test and visualize the LSTM model's loss and predicted vs actual prices and
 def run_LSTM_test():
@@ -1092,75 +1074,95 @@ def run_rolling_forecasts(start_date = '2024-01-01', last_n_days=3, steps_ahead=
     print(f"Logs saved to: {log_path}")
     print(log_df)
 
-def prepare_eod_training_data(df, scaler=None):
-    if 'close' not in df.columns or 'timestamp' not in df.columns:
-        raise ValueError("DataFrame must have 'close' and 'timestamp' columns.")
-
-    df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['hour'] = df['timestamp'].dt.hour
-    df['hour_norm'] = df['hour'] / 23.0
+def prepare_eod_training_data_hybrid(df, x_scaler=None, y_scaler=None, lookback=120):
+    df = add_technical_indicators(df)
     df['date'] = df['timestamp'].dt.date
 
-    X, y = [], []
+    feature_cols = [
+        'close', 'rsi', 'bb_width', 'volume_scaled',
+        'macd_line', 'macd_signal', 'macd_hist',
+        'obv', 'stoch_k', 'stoch_d', 'adx', 'cci'
+    ]
 
+
+    df = df.dropna(subset=feature_cols)
+
+    X, y = [], []
     all_dates = sorted(df['date'].unique())
+
     for i in range(3, len(all_dates)):
         day = all_dates[i]
-        day_rows = df[df['date'] == day]
-        if len(day_rows) < 24:
+        day_data = df[df['date'] == day]
+        if len(day_data) < 24:
             continue
 
-        end_of_day_price = day_rows['close'].iloc[-1]
+        end_of_day_price = day_data['close'].iloc[-1]
+        hist = df[df['timestamp'] < day_data['timestamp'].iloc[0]].tail(lookback)
 
-        history = df[df['timestamp'] < day_rows['timestamp'].iloc[0]].tail(60)
-        if len(history) < 60:
+        if len(hist) < lookback:
             continue
 
-        X_close = history['close'].values.reshape(-1, 1)
-        X_hour = history['hour_norm'].values.reshape(-1, 1)
-        X_combined = np.hstack([X_close, X_hour])  # (60, 2)
-
-        X.append(X_combined)
+        seq = hist[feature_cols].values  # shape: (lookback, features)
+        X.append(seq)
         y.append(end_of_day_price)
 
-    X = np.array(X)  # shape: (samples, 60, 2)
+    X = np.array(X)  # (samples, lookback, features)
     y = np.array(y).reshape(-1, 1)
 
-    if scaler is None:
-        scaler = MinMaxScaler()
-        X[:, :, 0] = scaler.fit_transform(X[:, :, 0])  # scale close only
-        y = scaler.transform(y)
+    if x_scaler is None:
+        x_scaler = MinMaxScaler()
+        X_shape = X.shape
+        X = x_scaler.fit_transform(X.reshape(-1, X_shape[2])).reshape(X_shape)
     else:
-        X[:, :, 0] = scaler.transform(X[:, :, 0])
-        y = scaler.transform(y)
+        X_shape = X.shape
+        X = x_scaler.transform(X.reshape(-1, X_shape[2])).reshape(X_shape)
 
-    return X, y, scaler
+    if y_scaler is None:
+        y_scaler = MinMaxScaler()
+        y = y_scaler.fit_transform(y)
+    else:
+        y = y_scaler.transform(y)
 
-def get_eod_scaler(df):
-    df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    data = df['close'].values.reshape(-1, 1)
-    scaler = MinMaxScaler()
-    scaler.fit(data)
-    return scaler
+    return X, y, x_scaler, y_scaler
 
+def build_hybrid_LSTM_model(input_shape, units=64, dropout=0.2):
+    model = Sequential()
+    model.add(Input(shape=input_shape))  # (lookback, features)
+    model.add(LSTM(units, return_sequences=True))
+    model.add(Dropout(dropout))
+    model.add(LSTM(units))
+    model.add(Dropout(dropout))
+    model.add(Dense(1))  # Predict EOD price
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    return model
+
+def train_hybrid_model(df, lookback=120):
+    X, y, x_scaler, y_scaler = prepare_eod_training_data_hybrid(df, lookback=lookback)
+    input_shape = (X.shape[1], X.shape[2])
+    model = build_hybrid_LSTM_model(input_shape)
+
+    early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    history = model.fit(X, y, epochs=100, batch_size=32, validation_split=0.1, callbacks=[early_stop], verbose=1)
+
+    return model, x_scaler, y_scaler, history
+
+# def predict_eod_with_uncertainty(model, scaler, input_sequence, n_simulations=30):
+#     preds = []
+#     for _ in range(n_simulations):
+#         input_seq_reshaped = input_sequence.reshape(1, 60, 1)
+#         predicted_scaled = model(input_seq_reshaped, training=True)
+#         predicted = scaler.inverse_transform(predicted_scaled)[0][0]
+#         preds.append(predicted)
+#     return np.mean(preds), np.std(preds)
 
 def predict_eod_with_uncertainty(model, scaler, input_sequence, n_simulations=30):
-    if input_sequence.shape != (60, 2):
-        raise ValueError(f"[🛑 Invalid input] Expected shape (60, 2), got {input_sequence.shape}")
-    
-    reshaped_input = input_sequence.reshape(1, 60, 2)  # (1, 60, 2)
     preds = []
-
+    input_seq_reshaped = input_sequence.reshape(1, *input_sequence.shape)  # 🛠️ Generalize
     for _ in range(n_simulations):
-        output = model(reshaped_input, training=True)
-        unscaled_output = scaler.inverse_transform(output)[0][0]
-        preds.append(unscaled_output)
-
+        predicted_scaled = model(input_seq_reshaped, training=True)
+        predicted = scaler.inverse_transform(predicted_scaled)[0][0]
+        preds.append(predicted)
     return np.mean(preds), np.std(preds)
-
-
 
 def run_eod_forecasts(start_date='2024-01-01', last_n_days=5, model_dir='models', log_path='eod_prediction_logs.csv'):
     os.makedirs(model_dir, exist_ok=True)
@@ -1209,9 +1211,7 @@ def run_eod_forecasts(start_date='2024-01-01', last_n_days=5, model_dir='models'
         if os.path.exists(model_path):
             print(f"Loading existing model from {model_path}")
             model = load_model_from_file(model_path)
-            # _, _, scaler = prepare_eod_training_data(train_df)
-            scaler = get_eod_scaler(train_df)
-
+            _, _, scaler = prepare_eod_training_data(train_df)
         else:
             print(f"Training new model for {day}")
             X_train, y_train, scaler = prepare_eod_training_data(train_df)
@@ -1219,21 +1219,8 @@ def run_eod_forecasts(start_date='2024-01-01', last_n_days=5, model_dir='models'
             model.save(model_path)
             print(f"Model saved to {model_path}")
 
-        # Build the input sequence for prediction (60 past hours, close + hour_norm)
-        last_60 = train_df.tail(60).copy()
-        last_60['hour'] = last_60['timestamp'].dt.hour
-        last_60['hour_norm'] = last_60['hour'] / 23.0
-
-        X_close = last_60['close'].values.reshape(-1, 1)
-        X_hour = last_60['hour_norm'].values.reshape(-1, 1)
-        X_combined = np.hstack([X_close, X_hour])
-        X_combined[:, 0] = scaler.transform(X_combined[:, 0].reshape(-1, 1)).flatten()
-
-        assert X_combined.shape == (60, 2), f"Bad shape: {X_combined.shape}"
-        print(f"DEBUG input shape to model: {X_combined.shape}")
-        print(f"First row: {X_combined[0]}")  # Confirm values look right
-
-        mean_pred, std_pred = predict_eod_with_uncertainty(model, scaler, X_combined, n_simulations=30)
+        last_seq = scaler.transform(train_df['close'].values[-60:].reshape(-1, 1))
+        mean_pred, std_pred = predict_eod_with_uncertainty(model, scaler, last_seq, n_simulations=30)
         actual_price = future_df['close'].iloc[-1]
 
         mae = mean_absolute_error([actual_price], [mean_pred])
@@ -1262,21 +1249,6 @@ def run_eod_forecasts(start_date='2024-01-01', last_n_days=5, model_dir='models'
     print(f"Logs saved to: {log_path}")
     print(log_df)
 
-    # Plot MAE trend
-    mae_series = log_df[['date', 'MAE']].copy()
-    mae_series['date'] = pd.to_datetime(mae_series['date'])
-
-    plt.figure(figsize=(10, 3.5))
-    plt.plot(mae_series['date'], mae_series['MAE'], marker='o', color='purple')
-    plt.title("MAE Over Time (EOD Forecasts)")
-    plt.xlabel("Date")
-    plt.ylabel("Mean Absolute Error (USD)")
-    plt.grid(True)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig("eod_mae_over_time.png")
-    plt.close()
-
     # Plot combined predictions vs actual
     if all_dates:
         all_dates = pd.to_datetime(all_dates)
@@ -1296,6 +1268,384 @@ def run_eod_forecasts(start_date='2024-01-01', last_n_days=5, model_dir='models'
         plt.pause(3)
         plt.close('all')
 
+def test_lookback_windows_for_eod(
+    df, 
+    lookback_windows=[60, 72, 96, 120], 
+    epochs=50, 
+    batch_size=32,
+    verbose=1
+):
+    results = []
+
+    for lb in lookback_windows:
+        print(f"\nTesting lookback window: {lb} hours")
+        try:
+            X, y, scaler = prepare_eod_training_data(df, lookback=lb)
+        except Exception as e:
+            print(f"[!] Failed at lookback={lb}: {e}")
+            continue
+
+        if len(X) < 10:
+            print(f"[!] Skipping lookback={lb} — not enough samples ({len(X)})")
+            continue
+
+        # Train the model
+        model, history = train_model_LSTM(X, y, input_shape=(lb, 1), validation_split=0.1)
+
+        # Predict on training set just to test fit (optionally split real test set)
+        y_pred_scaled = model.predict(X)
+        y_pred = scaler.inverse_transform(y_pred_scaled)
+        y_true = scaler.inverse_transform(y)
+
+        # Evaluate
+        mae = mean_absolute_error(y_true, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+
+        print(f"✅ Lookback={lb} → MAE: {mae:.2f}, RMSE: {rmse:.2f}")
+        results.append({
+            "lookback": lb,
+            "MAE": mae,
+            "RMSE": rmse
+        })
+
+    # Show summary
+    print("\nLookback Performance Summary:")
+    results_df = pd.DataFrame(results).sort_values("RMSE")
+    print(results_df.to_string(index=False))
+
+    return results_df
+
+def test_extended_lookbacks(df):
+    # Define new lookback set
+    extended_lookbacks = [144, 168]
+    return test_lookback_windows_for_eod(df, lookback_windows=extended_lookbacks)
+
+def add_technical_indicators(df):
+    df = df.copy()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df.sort_values('timestamp')
+
+    # RSI
+    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+
+    # Bollinger Band Width
+    bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
+    df['bb_width'] = bb.bollinger_wband()
+
+    # Volume Scaled (fallback to 0 if not present)
+    if 'volume' in df.columns:
+        df['volume_scaled'] = (df['volume'] - df['volume'].mean()) / df['volume'].std()
+    else:
+        df['volume_scaled'] = 0
+
+    # MACD
+    macd = ta.trend.MACD(df['close'], window_slow=26, window_fast=12, window_sign=9)
+    df['macd_line'] = macd.macd()
+    df['macd_signal'] = macd.macd_signal()
+    df['macd_hist'] = macd.macd_diff()
+
+    # On-Balance Volume
+    df['obv'] = ta.volume.OnBalanceVolumeIndicator(close=df['close'], volume=df.get('volume', pd.Series(0))).on_balance_volume()
+
+    # Stochastic Oscillator
+    stoch = ta.momentum.StochasticOscillator(high=df['high'], low=df['low'], close=df['close'], window=14, smooth_window=3)
+    df['stoch_k'] = stoch.stoch()
+    df['stoch_d'] = stoch.stoch_signal()
+
+    # ADX
+    df['adx'] = ta.trend.ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14).adx()
+
+    # CCI
+    df['cci'] = ta.trend.CCIIndicator(high=df['high'], low=df['low'], close=df['close'], window=20).cci()
+
+    return df
+
+def evaluate_hybrid_model_on_holdout(df, lookback=120):
+    from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+    df = add_technical_indicators(df)
+    df['date'] = df['timestamp'].dt.date
+
+    feature_cols = [
+        'close', 'rsi', 'bb_width', 'volume_scaled',
+        'macd_line', 'macd_signal', 'macd_hist',
+        'obv', 'stoch_k', 'stoch_d', 'adx', 'cci'
+    ]
+    
+    df = df.dropna(subset=feature_cols)
+
+    all_dates = sorted(df['date'].unique())
+    split_idx = int(len(all_dates) * 0.8)
+    train_dates = all_dates[:split_idx]
+    test_dates = all_dates[split_idx:]
+
+    train_df = df[df['date'].isin(train_dates)]
+    test_df = df[df['date'].isin(test_dates)]
+
+    X_train, y_train, x_scaler, y_scaler = prepare_eod_training_data_hybrid(train_df, lookback=lookback)
+    input_shape = (X_train.shape[1], X_train.shape[2])
+    model = build_hybrid_LSTM_model(input_shape)
+
+    history = model.fit(
+        X_train, y_train,
+        epochs=100,
+        batch_size=32,
+        validation_split=0.1,
+        callbacks=[EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)],
+        verbose=1
+    )
+
+    all_preds = []
+    all_actuals = []
+    all_dates_eval = []
+
+    for day in test_dates:
+        day_data = test_df[test_df['date'] == day]
+        if len(day_data) < 24:
+            continue
+
+        hist = df[df['timestamp'] < day_data['timestamp'].iloc[0]].tail(lookback)
+        if len(hist) < lookback:
+            continue
+
+        input_seq = hist[feature_cols].values
+        input_scaled = x_scaler.transform(input_seq).reshape(1, lookback, len(feature_cols))
+
+        predicted_scaled = model.predict(input_scaled, verbose=0)
+        predicted = y_scaler.inverse_transform(predicted_scaled)[0][0]
+        actual = day_data['close'].iloc[-1]
+
+        all_preds.append(predicted)
+        all_actuals.append(actual)
+        all_dates_eval.append(day)
+
+    mae = mean_absolute_error(all_actuals, all_preds)
+    rmse = np.sqrt(mean_squared_error(all_actuals, all_preds))
+    metrics_text = f'MAE: {mae:.2f}\nRMSE: {rmse:.2f}'
+
+    print(f"\nEvaluation on Holdout Set ({len(all_preds)} days):")
+    print(f"MAE:  {mae:.2f}")
+    print(f"RMSE: {rmse:.2f}")
+
+    all_dates_eval = pd.to_datetime(all_dates_eval)
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(all_dates_eval, all_actuals, label="Actual EOD", color="red", marker='o')
+    plt.plot(all_dates_eval, all_preds, label="Predicted EOD", color="blue", marker='o')
+    plt.title(f"Hybrid LSTM EOD Prediction on 20% Holdout ({len(all_preds)} Days)")
+    plt.xlabel("Date")
+    plt.ylabel("BTC Price (USD)")
+    plt.grid(True)
+    plt.xticks(rotation=45)
+    plt.legend()
+    plt.tight_layout()
+    plt.gcf().text(0.5, 0.90, metrics_text, fontsize=10, ha='center', va='top',
+                   bbox=dict(facecolor='white', edgecolor='black', alpha=0.8))
+    plt.savefig("hybrid_eod_holdout_prediction.png")
+    plt.show(block=False)
+    plt.pause(3)
+    plt.close('all')
+
+    return mae, rmse
+
+def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.01, 
+                                    cooldown_days=2, lookahead_days=3, model_dir="models",
+                                    model_config={"units": 64, "dropout": 0.2},
+                                    retrain_daily=False, force_retrain=False):
+
+    os.makedirs(model_dir, exist_ok=True)
+
+    df = add_technical_indicators(df)
+    df['date'] = df['timestamp'].dt.date
+
+    feature_cols = [
+        'close', 'rsi', 'bb_width', 'volume_scaled',
+        'macd_line', 'macd_signal', 'macd_hist',
+        'obv', 'stoch_k', 'stoch_d', 'adx', 'cci'
+    ]
+
+    df = df.dropna(subset=feature_cols)
+    all_dates = sorted(df['date'].unique())
+
+    split_idx = int(len(all_dates) * 0.8)
+    test_dates = all_dates[split_idx:]
+
+    train_eod = df[df['date'].isin(all_dates[:split_idx])].groupby('date')['close'].last()
+    daily_deltas = train_eod.diff().dropna()
+    delta_mean = daily_deltas.abs().mean()
+    delta_std = daily_deltas.abs().std()
+    dynamic_threshold = delta_mean + delta_std
+
+    print(f"Estimated EOD Delta Mean: {delta_mean:.2f} | Std Dev: {delta_std:.2f}")
+    print(f"Using dynamic trade threshold: {dynamic_threshold:.2f}")
+
+    cash = initial_cash
+    btc = 0
+    trade_log = []
+    portfolio_values = []
+    std_history = []
+    rolling_window = 5
+    dynamic_std_limit_min = 2000
+
+    buy_dates = []
+    sell_dates = []
+    buy_prices = []
+    sell_prices = []
+
+    for i in range(1, len(test_dates)):
+        prev_day = test_dates[i - 1]
+        curr_day = test_dates[i]
+        curr_data = df[df['date'] == curr_day]
+        if len(curr_data) < 24:
+            continue
+
+        actual_prev_eod = df[df['date'] == prev_day]['close'].iloc[-1]
+        actual_today_eod = curr_data['close'].iloc[-1]
+
+        updated_train_df = df[df['timestamp'] < curr_data['timestamp'].iloc[0]]
+        if len(updated_train_df) < lookback * 2:
+            print(f"Skipping {curr_day}: Not enough training data.")
+            continue
+
+        train_start_dt = updated_train_df['timestamp'].iloc[0]
+        train_end_dt = updated_train_df['timestamp'].iloc[-1]
+
+        hash_input = f"{lookback}_{feature_cols}_{model_config}_{train_start_dt}_{train_end_dt}"
+        model_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16]
+        model_filename = f"lstm_{model_hash}.keras"
+        model_path = os.path.join(model_dir, model_filename)
+
+        retrain_condition = retrain_daily or force_retrain or not os.path.exists(model_path)
+
+        if retrain_condition:
+            print(f"[{curr_day}] Training model (reason: {'forced' if force_retrain else 'daily' if retrain_daily else 'missing'})")
+            try:
+                X_train, y_train, x_scaler, y_scaler = prepare_eod_training_data_hybrid(updated_train_df, lookback=lookback)
+            except Exception as e:
+                print(f"[{curr_day}] Training prep error: {e}")
+                continue
+
+            input_shape = (X_train.shape[1], X_train.shape[2])
+            model = build_hybrid_LSTM_model(input_shape, **model_config)
+            model.fit(X_train, y_train, epochs=100, batch_size=32, validation_split=0.1, verbose=0)
+            model.save(model_path)
+            print(f"[{curr_day}] Saved model to {model_path}")
+        else:
+            print(f"[{curr_day}] Loading model from cache: {model_path}")
+            model = load_model_from_file(model_path)
+            _, _, x_scaler, y_scaler = prepare_eod_training_data_hybrid(updated_train_df, lookback=lookback)
+
+        hist = updated_train_df.tail(lookback)
+        input_seq = hist[feature_cols].values
+        input_scaled = x_scaler.transform(input_seq).reshape(1, lookback, len(feature_cols))
+        mean_pred, std_pred = predict_eod_with_uncertainty(model, y_scaler, input_seq, n_simulations=30)
+
+        std_history.append(std_pred)
+        if len(std_history) >= rolling_window:
+            dynamic_std_limit = max(np.mean(std_history[-rolling_window:]) * 1.25, dynamic_std_limit_min)
+        else:
+            dynamic_std_limit = float('inf')
+
+        predicted_cum = [mean_pred]
+        future_hist = hist.copy()
+        future_dates = test_dates[i+1:i+1+lookahead_days]
+        for f_day in future_dates:
+            f_day_data = df[df['date'] == f_day]
+            if len(f_day_data) < 24:
+                continue
+            future_hist = pd.concat([future_hist, f_day_data]).tail(lookback)
+            if len(future_hist) < lookback:
+                continue
+            f_input = future_hist[feature_cols].values
+            f_input_scaled = x_scaler.transform(f_input).reshape(1, lookback, len(feature_cols))
+            f_pred, _ = predict_eod_with_uncertainty(model, y_scaler, f_input, n_simulations=30)
+            predicted_cum.append(f_pred)
+
+        predicted_cum_delta = predicted_cum[-1] - actual_today_eod
+        decision = "HOLD"
+        qty_scaled = qty
+
+        if std_pred <= dynamic_std_limit:
+            confidence = 1 - (std_pred / dynamic_std_limit)
+            qty_scaled = qty * confidence
+            if predicted_cum_delta >= dynamic_threshold and cash >= actual_today_eod * qty_scaled:
+                btc += qty_scaled
+                cash -= actual_today_eod * qty_scaled
+                decision = "BUY"
+                buy_dates.append(curr_day)
+                buy_prices.append(actual_today_eod)
+            elif predicted_cum_delta <= -dynamic_threshold and btc >= qty_scaled:
+                btc -= qty_scaled
+                cash += actual_today_eod * qty_scaled
+                decision = "SELL"
+                sell_dates.append(curr_day)
+                sell_prices.append(actual_today_eod)
+
+        total_value = cash + btc * actual_today_eod
+        trade_log.append({
+            'date': str(curr_day),
+            'actual_eod': actual_today_eod,
+            'predicted_eod': mean_pred,
+            'pred_std': std_pred,
+            'prev_eod': actual_prev_eod,
+            'decision': decision,
+            'confidence': confidence if std_pred <= dynamic_std_limit else 0,
+            'qty_scaled': qty_scaled if std_pred <= dynamic_std_limit else 0,
+            'cash': cash,
+            'btc': btc,
+            'portfolio_value': total_value
+        })
+
+        portfolio_values.append(total_value)
+
+    print("\nSimulation Complete")
+    print(f"Final Portfolio Value: ${portfolio_values[-1]:,.2f}")
+    print(f"Total Trades: {sum(1 for t in trade_log if t['decision'] != 'HOLD')}")
+
+    pd.DataFrame(trade_log).to_csv("eod_trade_log.csv", index=False)
+
+    all_dates_eval = pd.to_datetime([row['date'] for row in trade_log])
+    all_actuals = [row['actual_eod'] for row in trade_log]
+    all_preds = [row['predicted_eod'] for row in trade_log]
+    all_stds = [row['pred_std'] for row in trade_log]
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(all_dates_eval, all_actuals, color='red', label="Actual EOD")
+    plt.plot(all_dates_eval, all_preds, color='blue', label="Predicted EOD")
+    plt.fill_between(
+        all_dates_eval,
+        np.array(all_preds) - 2 * np.array(all_stds),
+        np.array(all_preds) + 2 * np.array(all_stds),
+        color='blue', alpha=0.2, label="±95% CI"
+    )
+    plt.scatter(pd.to_datetime(buy_dates), buy_prices, marker='^', color='green', label='Buy Signal', zorder=5)
+    plt.scatter(pd.to_datetime(sell_dates), sell_prices, marker='v', color='red', label='Sell Signal', zorder=5)
+    plt.legend()
+    plt.title("Hybrid LSTM EOD Forecasts with Daily Retraining")
+    plt.xlabel("Date")
+    plt.ylabel("BTC Price (USD)")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig("eod_forecast_prediction.png")
+    plt.show(block=False)
+    plt.pause(5)
+    plt.close('all')
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(all_dates_eval, portfolio_values, color='green', linestyle='-', label="Portfolio Value")
+    plt.title("Simulated Portfolio Value Over Time")
+    plt.xlabel("Date")
+    plt.ylabel("USD")
+    plt.xticks(rotation=45)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.legend()
+    plt.savefig("eod_portfolio_value.png")
+    plt.show(block=False)
+    plt.pause(5)
+    plt.close('all')
+
+    return trade_log
 
 
 def main():
@@ -1318,7 +1668,65 @@ def main():
     # run_multi_step_test(load_if_exists=False)
     set_random_seed(42)
     # run_rolling_forecasts("2024-01-01", last_n_days=1)
-    run_eod_forecasts("2024-01-01", last_n_days=10)
+    # run_eod_forecasts("2024-01-01", last_n_days=10)
+
+    # Load historical BTC data
+    df = crypto_bars('BTC/USD', "2024-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
+    df = df.reset_index()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
+
+    # Run the test loop
+    # test_results = test_lookback_windows_for_eod(df)
+
+    # Step 2: Run test for 6–7 day windows
+    # results_df = test_extended_lookbacks(df)
+
+    # print("\nTraining hybrid LSTM model with RSI, BB, Volume...")
+    # model, x_scaler, y_scaler, history = train_hybrid_model(df, lookback=120)
+
+    # # Plot training loss (optional)
+    # plt.figure(figsize=(8, 4))
+    # plt.plot(history.history['loss'], label='Train Loss')
+    # if 'val_loss' in history.history:
+    #     plt.plot(history.history['val_loss'], label='Val Loss')
+    # plt.title("Training Loss (Hybrid LSTM)")
+    # plt.xlabel("Epochs")
+    # plt.ylabel("MSE Loss")
+    # plt.grid(True)
+    # plt.legend()
+    # plt.tight_layout()
+    # plt.savefig("hybrid_training_loss.png")
+    # plt.close()
+
+    # # Save the trained model
+    # save_model(model, path="hybrid_eod_model.keras")
+    # print("Model saved as hybrid_eod_model.keras")
+
+    # # (Optional) Predict next EOD using last sequence
+    # last_seq_df = add_technical_indicators(df).dropna().tail(120)
+    # input_seq = last_seq_df[['close', 'rsi', 'bb_width', 'volume_scaled']].values
+    # input_seq_scaled = x_scaler.transform(input_seq).reshape(1, 120, 4)
+    # predicted_eod_scaled = model.predict(input_seq_scaled)
+    # predicted_eod = y_scaler.inverse_transform(predicted_eod_scaled)[0][0]
+
+
+    # print(f"\nPredicted BTC EOD Price: ${predicted_eod:,.2f}")
+
+    # evaluate_hybrid_model_on_holdout(df, lookback=120)
+
+    # simulate_eod_trading_on_holdout(
+    #     df,
+    #     lookback=120,
+    #     threshold=500,
+    #     std_limit=6000,
+    #     initial_cash=10000,
+    #     qty=0.001
+    # )
+
+    simulate_eod_trading_on_holdout(df, retrain_daily=False)
+
+
 
 
 if __name__ == "__main__":
