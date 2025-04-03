@@ -1342,7 +1342,7 @@ def evaluate_hybrid_model_on_holdout(df, lookback=120):
 # This runs 30 separate stochastic forward passes per day
 # def predict_eod_with_uncertainty(model, scaler, input_sequence, n_simulations=30):
 #     preds = []
-#     input_seq_reshaped = input_sequence.reshape(1, *input_sequence.shape)  # 🛠️ Generalize
+#     input_seq_reshaped = input_sequence.reshape(1, *input_sequence.shape)
 #     for _ in range(n_simulations):
 #         predicted_scaled = model(input_seq_reshaped, training=True)
 #         predicted = scaler.inverse_transform(predicted_scaled)[0][0]
@@ -1548,6 +1548,10 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     unlock_threshold = initial_portfolio_value * 1.10  # 10% increase threshold
     profit_pool = 0.0  # Tracks locked-in profits
     profit_lock_threshold = initial_cash * 1.10
+    low_cash_threshold = initial_cash * 0.10
+    min_cash_restore_target = initial_cash * 0.25
+    
+
 
     for i in range(1, len(test_dates)):
         prev_day = test_dates[i - 1]
@@ -1575,15 +1579,27 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
         total_btc = btc_available + btc_locked_hodl
         total_value = cash + total_btc * actual_today_eod
 
-        if total_value >= profit_lock_threshold:
-            # Release half of the locked BTC
+        last_unlock_value = initial_cash
+        position_multiplier = 1.0
+
+
+        if total_value >= profit_lock_threshold and btc_locked_hodl > 0:
             unlocked_qty = btc_locked_hodl * 0.5
+            if unlocked_qty < 1e-6:
+                continue
             btc_locked_hodl -= unlocked_qty
             btc_available += unlocked_qty
-            print(f"RELEASED LOCKED BTC: +{unlocked_qty:.4f} BTC back to tradable pool due to 10% portfolio increase.")
 
-            # Update the unlock threshold for the next 10% increase
-            unlock_threshold = total_value * 1.10
+            # Calculate how many 10% jumps we've done
+            growth_factor = total_value / last_unlock_value
+            position_multiplier = min(1.0 + (growth_factor - 1) * 2, 2.0)  # Cap at 2.0x
+
+            print(f"*** RELEASED LOCKED BTC: +{unlocked_qty:.4f} BTC due to 10% portfolio growth.")
+            print(f"*** NEW POSITION MULTIPLIER: x{position_multiplier:.2f}")
+
+            last_unlock_value = total_value
+            profit_lock_threshold = total_value * 1.10
+
 
         std_history.append(std_pred)
         # dynamic_std_limit = max(np.mean(std_history[-rolling_window:]) * 1.25, dynamic_std_limit_min) \
@@ -1639,49 +1655,92 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
             days_held = (curr_day - trade['buy_date']).days
             profit_target_price = trade['buy_price'] * (1 + min_profit_pct)
 
-            if days_held >= unlock_days and actual_today_eod >= profit_target_price:
-                unlock_qty = trade['buy_qty'] * release_fraction
+            # if days_held >= unlock_days and actual_today_eod >= profit_target_price:
+            #     unlock_qty = trade['buy_qty'] * release_fraction
 
-                if btc_locked_hodl >= unlock_qty:
-                    btc_locked_hodl -= unlock_qty
-                    btc_available += unlock_qty
+            #     if btc_locked_hodl >= unlock_qty:
+            #         btc_locked_hodl -= unlock_qty
+            #         btc_available += unlock_qty
 
-                    trade['sold'] = True  # OR flag as 'partially_unlocked'
+            #         trade['sold'] = True  # OR flag as 'partially_unlocked'
 
-                    print(f"\nUNLOCKED HODL! -> +{unlock_qty:.4f} BTC back to tradable pool @ ${actual_today_eod:.2f}")
+            #         print(f"\nUNLOCKED HODL! -> +{unlock_qty:.4f} BTC back to tradable pool @ ${actual_today_eod:.2f}")
 
-                    unlock_log.append({
-                        'date': str(curr_day),
-                        'action': 'UNLOCK',
-                        'unlocked_qty': unlock_qty,
-                        'price': actual_today_eod,
-                        'held_days': days_held
-                    })
+            #         unlock_log.append({
+            #             'date': str(curr_day),
+            #             'action': 'UNLOCK',
+            #             'unlocked_qty': unlock_qty,
+            #             'price': actual_today_eod,
+            #             'held_days': days_held
+            #         })
 
-                if actual_today_eod > trade['buy_price']:
-                    sell_qty = trade['buy_qty'] * 0.5
-                    if btc_available >= sell_qty:
-                        btc_available -= sell_qty
-                        cash += actual_today_eod * sell_qty
-                        trade['sold'] = True
-                        decision = "PARTIAL SELL"
+            #     if actual_today_eod > trade['buy_price']:
+            #         sell_qty = trade['buy_qty'] * 0.5
+            #         if btc_available >= sell_qty:
+            #             btc_available -= sell_qty
+            #             cash += actual_today_eod * sell_qty
+            #             trade['sold'] = True
+            #             decision = "PARTIAL SELL"
+        # Emergency Liquidity Unlock Logic
+        if cash < low_cash_threshold and btc_available > 0:
+            btc_to_sell = min(btc_available, (min_cash_restore_target - cash) / actual_today_eod)
+            if btc_to_sell > 1e-6:
+                btc_available -= btc_to_sell
+                cash += btc_to_sell * actual_today_eod
+                decision = "LIQUIDATE BTC"
+                print(f"\n!!! LOW CASH: Sold {btc_to_sell:.4f} BTC to restore liquidity. Cash: ${cash:,.2f}")
+
+        if cash < low_cash_threshold and btc_available < 0.01 and btc_locked_hodl > 0.01:
+            emergency_unlock = btc_locked_hodl * 0.25
+            btc_locked_hodl -= emergency_unlock
+            btc_available += emergency_unlock
+            print(f"\n!!! Emergency unlock: {emergency_unlock:.4f} BTC released from HODL to liquidity pool.")
+
 
         if std_pred <= dynamic_std_limit and can_trade:
-            if predicted_cum_delta >= buy_threshold and cash >= actual_today_eod * qty:
-                btc_available += qty * 0.5
-                btc_locked_hodl += qty * 0.5
-                cash -= actual_today_eod * qty
+            # if predicted_cum_delta >= buy_threshold and cash >= actual_today_eod * qty:
+            #     btc_available += qty * 0.5
+            #     btc_locked_hodl += qty * 0.5
+            #     cash -= actual_today_eod * qty
+            #     decision = "BUY"
+            #     last_buy_date = curr_day
+            #     active_trades.append({
+            #         'buy_date': curr_day,
+            #         'buy_price': actual_today_eod,
+            #         'buy_qty': qty,
+            #         'sold': False
+            #     })
+
+            # Dynamic Position Sizing
+            base_qty = 0.01
+            min_qty = 0.001
+
+            confidence_score = 1 / (1 + std_pred)
+            # adjusted_qty = np.clip(base_qty * confidence_score, min_qty, base_qty)
+            adjusted_qty = np.clip(base_qty * confidence_score * position_multiplier, min_qty, base_qty * position_multiplier)
+
+
+            required_cash = actual_today_eod * adjusted_qty
+
+            if predicted_cum_delta >= buy_threshold and cash >= required_cash:
+                btc_available += adjusted_qty * 0.5
+                btc_locked_hodl += adjusted_qty * 0.5
+                cash -= required_cash
+
                 decision = "BUY"
                 last_buy_date = curr_day
                 active_trades.append({
                     'buy_date': curr_day,
                     'buy_price': actual_today_eod,
-                    'buy_qty': qty,
+                    'buy_qty': adjusted_qty,
                     'sold': False
                 })
+
             elif predicted_cum_delta <= sell_threshold and btc_available >= qty:
-                btc_available -= qty
-                cash += actual_today_eod * qty
+                # btc_available -= qty
+                # cash += actual_today_eod * qty
+                btc_available -= adjusted_qty
+                cash += actual_today_eod * adjusted_qty
                 decision = "SELL"
 
         total_btc = btc_available + btc_locked_hodl
@@ -1730,6 +1789,8 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
         label="95% Confidence Interval"
     )
     plt.title("BTC EOD Prediction with Hybrid LSTM")
+    plt.gcf().text(0.5, 0.90, f"Final Portfolio Value: ${portfolio_values[-1]:,.2f}", fontsize=10, ha='center', va='top',
+                   bbox=dict(facecolor='white', edgecolor='black', alpha=0.8))
     plt.xlabel("Date")
     plt.ylabel("BTC Price (USD)")
     plt.xticks(rotation=45)
@@ -1748,6 +1809,8 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     plt.figure(figsize=(12, 6))
     plt.plot(plot_dates, portfolio_vals, label="Portfolio Value", color='blue')
     plt.title("Portfolio Value Over Time")
+    plt.gcf().text(0.5, 0.90, f"Final Portfolio Value: ${portfolio_values[-1]:,.2f}", fontsize=10, ha='center', va='top',
+                   bbox=dict(facecolor='white', edgecolor='black', alpha=0.8))
     plt.xlabel("Date")
     plt.ylabel("Portfolio Value (USD)")
     plt.grid(True)
