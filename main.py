@@ -1289,7 +1289,7 @@ def test_lookback_windows_for_eod(
         mae = mean_absolute_error(y_true, y_pred)
         rmse = np.sqrt(mean_squared_error(y_true, y_pred))
 
-        print(f"✅ Lookback={lb} → MAE: {mae:.2f}, RMSE: {rmse:.2f}")
+        print(f"Lookback={lb} → MAE: {mae:.2f}, RMSE: {rmse:.2f}")
         results.append({
             "lookback": lb,
             "MAE": mae,
@@ -1567,7 +1567,7 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
         print(f"Cash: ${cash:,.2f}, Required: ${actual_today_eod * qty:,.2f}")
         print(f"Can Trade: {can_trade}")
 
-        unlock_days = 2  # 🔓 Min holding period
+        unlock_days = 2  # Min holding period
         min_profit_pct = 0.02  # At least 2% profit
         release_fraction = 0.5  # Release 50% of locked HODL when conditions are met
 
@@ -1587,7 +1587,7 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
 
                     trade['sold'] = True  # OR flag as 'partially_unlocked'
 
-                    print(f"🔓 UNLOCKED HODL → +{unlock_qty:.4f} BTC back to tradable pool @ ${actual_today_eod:.2f}")
+                    print(f"UNLOCKED HODL → +{unlock_qty:.4f} BTC back to tradable pool @ ${actual_today_eod:.2f}")
 
                     unlock_log.append({
                         'date': str(curr_day),
