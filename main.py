@@ -212,12 +212,6 @@ def train_model_LSTM(X, y, input_shape=(120, 1), validation_split=0.1):
 
     return model, history
 
-def save_model(model, path='btc_lstm_model.keras'):
-    model.save(path)
-
-def load_model_from_file(path='btc_lstm_model.keras'):
-    
-    return load_model(path)
 
 # Function to test and visualize the LSTM model's loss and predicted vs actual prices and
 def run_LSTM_test():
@@ -1074,54 +1068,8 @@ def run_rolling_forecasts(start_date = '2024-01-01', last_n_days=3, steps_ahead=
     print(f"Logs saved to: {log_path}")
     print(log_df)
 
-def prepare_eod_training_data_hybrid(df, lookback=120):
-    df = df.copy()
-    df['log_return'] = np.log(df['close'].shift(-1) / df['close'])
-    df['target'] = df['log_return'] * 100  # <- Scale return
-
-    # Feature engineering
-    df['ma_20'] = df['close'].rolling(20).mean()
-    df['ma_ratio'] = df['close'] / df['ma_20']
-    df['volatility_20'] = df['close'].rolling(20).std()
-    df['daily_range'] = (df['high'] - df['low']) / df['close']
-    df['body_size'] = abs(df['close'] - df['open']) / df['close']
-
-    feature_cols = [
-        'close', 'rsi', 'bb_width', 'volume_scaled',
-        'macd_line', 'macd_signal', 'macd_hist',
-        'obv', 'stoch_k', 'stoch_d', 'adx', 'cci',
-        'ma_ratio', 'volatility_20', 'daily_range', 'body_size'
-    ]
-
-    df = df.dropna(subset=feature_cols + ['target'])
-
-    X, y = [], []
-    for i in range(lookback, len(df)):
-        X.append(df.iloc[i - lookback:i][feature_cols].values)
-        y.append(df.iloc[i]['target'])
-
-    X = np.array(X)
-    y = np.array(y)
-
-    x_scaler = StandardScaler()
-    y_scaler = StandardScaler()
-
-    X_scaled = np.array([x_scaler.fit_transform(x) for x in X])
-    y_scaled = y_scaler.fit_transform(y.reshape(-1, 1)).ravel()
-
-    return X_scaled, y_scaled, x_scaler, y_scaler
 
 
-def build_hybrid_LSTM_model(input_shape, units=64, dropout=0.2):
-    model = Sequential()
-    model.add(Input(shape=input_shape))  # (lookback, features)
-    model.add(LSTM(units, return_sequences=True))
-    model.add(Dropout(dropout))
-    model.add(LSTM(units))
-    model.add(Dropout(dropout))
-    model.add(Dense(1))  # Predict EOD price
-    model.compile(optimizer='adam', loss='mean_squared_error')
-    return model
 
 def train_hybrid_model(df, lookback=120):
     X, y, x_scaler, y_scaler = prepare_eod_training_data_hybrid(df, lookback=lookback)
@@ -1142,14 +1090,6 @@ def train_hybrid_model(df, lookback=120):
 #         preds.append(predicted)
 #     return np.mean(preds), np.std(preds)
 
-def predict_eod_with_uncertainty(model, scaler, input_sequence, n_simulations=30):
-    preds = []
-    input_seq_reshaped = input_sequence.reshape(1, *input_sequence.shape)  # 🛠️ Generalize
-    for _ in range(n_simulations):
-        predicted_scaled = model(input_seq_reshaped, training=True)
-        predicted = scaler.inverse_transform(predicted_scaled)[0][0]
-        preds.append(predicted)
-    return np.mean(preds), np.std(preds)
 
 
 def run_eod_forecasts(start_date='2024-01-01', last_n_days=5, model_dir='models', log_path='eod_prediction_logs.csv'):
@@ -1308,46 +1248,6 @@ def test_extended_lookbacks(df):
     extended_lookbacks = [144, 168]
     return test_lookback_windows_for_eod(df, lookback_windows=extended_lookbacks)
 
-def add_technical_indicators(df):
-    df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df = df.sort_values('timestamp')
-
-    # RSI
-    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-
-    # Bollinger Band Width
-    bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
-    df['bb_width'] = bb.bollinger_wband()
-
-    # Volume Scaled (fallback to 0 if not present)
-    if 'volume' in df.columns:
-        df['volume_scaled'] = (df['volume'] - df['volume'].mean()) / df['volume'].std()
-    else:
-        df['volume_scaled'] = 0
-
-    # MACD
-    macd = ta.trend.MACD(df['close'], window_slow=26, window_fast=12, window_sign=9)
-    df['macd_line'] = macd.macd()
-    df['macd_signal'] = macd.macd_signal()
-    df['macd_hist'] = macd.macd_diff()
-
-    # On-Balance Volume
-    df['obv'] = ta.volume.OnBalanceVolumeIndicator(close=df['close'], volume=df.get('volume', pd.Series(0))).on_balance_volume()
-
-    # Stochastic Oscillator
-    stoch = ta.momentum.StochasticOscillator(high=df['high'], low=df['low'], close=df['close'], window=14, smooth_window=3)
-    df['stoch_k'] = stoch.stoch()
-    df['stoch_d'] = stoch.stoch_signal()
-
-    # ADX
-    df['adx'] = ta.trend.ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14).adx()
-
-    # CCI
-    df['cci'] = ta.trend.CCIIndicator(high=df['high'], low=df['low'], close=df['close'], window=20).cci()
-
-    return df
-
 def evaluate_hybrid_model_on_holdout(df, lookback=120):
     from sklearn.metrics import mean_absolute_error, mean_squared_error
 
@@ -1436,6 +1336,88 @@ def evaluate_hybrid_model_on_holdout(df, lookback=120):
 
     return mae, rmse
 
+
+
+
+# This runs 30 separate stochastic forward passes per day
+# def predict_eod_with_uncertainty(model, scaler, input_sequence, n_simulations=30):
+#     preds = []
+#     input_seq_reshaped = input_sequence.reshape(1, *input_sequence.shape)  # 🛠️ Generalize
+#     for _ in range(n_simulations):
+#         predicted_scaled = model(input_seq_reshaped, training=True)
+#         predicted = scaler.inverse_transform(predicted_scaled)[0][0]
+#         preds.append(predicted)
+#     return np.mean(preds), np.std(preds)
+
+# Trying out batch predict instead of looping like above
+# This one is much faster, but slightly less accurate
+def predict_eod_with_uncertainty(model, scaler, input_sequence, n_simulations=30):
+    input_seq_reshaped = input_sequence.reshape(1, *input_sequence.shape)
+    input_seq_batch = np.repeat(input_seq_reshaped, n_simulations, axis=0)  # shape: (30, lookback, features)
+    
+    predictions_scaled = model(input_seq_batch, training=True).numpy()
+    predictions = scaler.inverse_transform(predictions_scaled)
+    
+    mean_pred = predictions.mean()
+    std_pred = predictions.std()
+    
+    return mean_pred, std_pred
+
+def build_hybrid_LSTM_model(input_shape, units=64, dropout=0.2):
+    model = Sequential()
+    model.add(Input(shape=input_shape))  # (lookback, features)
+    model.add(LSTM(units, return_sequences=True))
+    model.add(Dropout(dropout))
+    model.add(LSTM(units))
+    model.add(Dropout(dropout))
+    model.add(Dense(1))  # Predict EOD price
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    return model
+
+def save_model(model, path='btc_lstm_model.keras'):
+    model.save(path)
+
+def load_model_from_file(path='btc_lstm_model.keras'):
+    
+    return load_model(path)
+
+def prepare_eod_training_data_hybrid(df, lookback=120):
+    df = df.copy()
+    df['log_return'] = np.log(df['close'].shift(-1) / df['close'])
+    df['target'] = df['log_return'] * 100  # <- Scale return
+
+    # Feature engineering
+    df['ma_20'] = df['close'].rolling(20).mean()
+    df['ma_ratio'] = df['close'] / df['ma_20']
+    df['volatility_20'] = df['close'].rolling(20).std()
+    df['daily_range'] = (df['high'] - df['low']) / df['close']
+    df['body_size'] = abs(df['close'] - df['open']) / df['close']
+
+    feature_cols = [
+        'close', 'rsi', 'bb_width', 'volume_scaled',
+        'macd_line', 'macd_signal', 'macd_hist',
+        'obv', 'stoch_k', 'stoch_d', 'adx', 'cci',
+        'ma_ratio', 'volatility_20', 'daily_range', 'body_size'
+    ]
+
+    df = df.dropna(subset=feature_cols + ['target'])
+
+    X, y = [], []
+    for i in range(lookback, len(df)):
+        X.append(df.iloc[i - lookback:i][feature_cols].values)
+        y.append(df.iloc[i]['target'])
+
+    X = np.array(X)
+    y = np.array(y)
+
+    x_scaler = StandardScaler()
+    y_scaler = StandardScaler()
+
+    X_scaled = np.array([x_scaler.fit_transform(x) for x in X])
+    y_scaled = y_scaler.fit_transform(y.reshape(-1, 1)).ravel()
+
+    return X_scaled, y_scaled, x_scaler, y_scaler
+
 def extract_high_volatility_window(df, window_size=20, top_pct=0.3):
     df = df.copy()
     df['rolling_vol'] = df['close'].rolling(window=window_size).std()
@@ -1445,6 +1427,46 @@ def extract_high_volatility_window(df, window_size=20, top_pct=0.3):
     high_vol_df = df[df['rolling_vol'] >= threshold]
     
     return high_vol_df
+
+def add_technical_indicators(df):
+    df = df.copy()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df.sort_values('timestamp')
+
+    # RSI
+    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+
+    # Bollinger Band Width
+    bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
+    df['bb_width'] = bb.bollinger_wband()
+
+    # Volume Scaled (fallback to 0 if not present)
+    if 'volume' in df.columns:
+        df['volume_scaled'] = (df['volume'] - df['volume'].mean()) / df['volume'].std()
+    else:
+        df['volume_scaled'] = 0
+
+    # MACD
+    macd = ta.trend.MACD(df['close'], window_slow=26, window_fast=12, window_sign=9)
+    df['macd_line'] = macd.macd()
+    df['macd_signal'] = macd.macd_signal()
+    df['macd_hist'] = macd.macd_diff()
+
+    # On-Balance Volume
+    df['obv'] = ta.volume.OnBalanceVolumeIndicator(close=df['close'], volume=df.get('volume', pd.Series(0))).on_balance_volume()
+
+    # Stochastic Oscillator
+    stoch = ta.momentum.StochasticOscillator(high=df['high'], low=df['low'], close=df['close'], window=14, smooth_window=3)
+    df['stoch_k'] = stoch.stoch()
+    df['stoch_d'] = stoch.stoch_signal()
+
+    # ADX
+    df['adx'] = ta.trend.ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14).adx()
+
+    # CCI
+    df['cci'] = ta.trend.CCIIndicator(high=df['high'], low=df['low'], close=df['close'], window=20).cci()
+
+    return df
 
 def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.01, 
                                     cooldown_days=2, lookahead_days=3, model_dir="models"):
@@ -1498,9 +1520,19 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
         print(f"[MODEL] Loading cached model from {model_path}")
         model = load_model_from_file(model_path)
     else:
-        print(f"[MODEL] Training new model → {model_path}")
+        print(f"[MODEL] Training new model -> {model_path}")
         model = build_hybrid_LSTM_model(input_shape)
         model.fit(X_train, y_train, epochs=100, batch_size=32, validation_split=0.1, verbose=0)
+        
+        y_pred_train = model.predict(X_train, verbose=0)
+        y_true_inv = y_scaler.inverse_transform(y_train.reshape(-1, 1)).flatten()
+        y_pred_inv = y_scaler.inverse_transform(y_pred_train).flatten()
+
+        mae = mean_absolute_error(y_true_inv, y_pred_inv)
+        rmse = np.sqrt(mean_squared_error(y_true_inv, y_pred_inv))
+
+        print(f"[TRAIN METRICS] MAE: {mae:.4f} | RMSE: {rmse:.4f}")
+
         model.save(model_path)
         print(f"[MODEL] Saved to {model_path}")
 
@@ -1512,6 +1544,10 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     rolling_window = 5
     dynamic_std_limit_min = 2000
     unlock_log = []
+    initial_portfolio_value = initial_cash
+    unlock_threshold = initial_portfolio_value * 1.10  # 10% increase threshold
+    profit_pool = 0.0  # Tracks locked-in profits
+    profit_lock_threshold = initial_cash * 1.10
 
     for i in range(1, len(test_dates)):
         prev_day = test_dates[i - 1]
@@ -1532,15 +1568,38 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
         mean_pred, std_pred = predict_eod_with_uncertainty(model, y_scaler, input_seq, n_simulations=30)
 
         predicted_log_return = mean_pred / 100
-        predicted_price = actual_today_eod * np.exp(predicted_log_return)
+        # predicted_price = actual_today_eod * np.exp(predicted_log_return)
+        predicted_price = actual_prev_eod * np.exp(predicted_log_return)
+
+        # Calculate the current portfolio value
+        total_btc = btc_available + btc_locked_hodl
+        total_value = cash + total_btc * actual_today_eod
+
+        if total_value >= profit_lock_threshold:
+            # Release half of the locked BTC
+            unlocked_qty = btc_locked_hodl * 0.5
+            btc_locked_hodl -= unlocked_qty
+            btc_available += unlocked_qty
+            print(f"RELEASED LOCKED BTC: +{unlocked_qty:.4f} BTC back to tradable pool due to 10% portfolio increase.")
+
+            # Update the unlock threshold for the next 10% increase
+            unlock_threshold = total_value * 1.10
 
         std_history.append(std_pred)
-        dynamic_std_limit = max(np.mean(std_history[-rolling_window:]) * 1.25, dynamic_std_limit_min) \
-            if len(std_history) >= rolling_window else float('inf')
+        # dynamic_std_limit = max(np.mean(std_history[-rolling_window:]) * 1.25, dynamic_std_limit_min) \
+        #     if len(std_history) >= rolling_window else float('inf')
+
+        if len(std_history) < rolling_window:
+            dynamic_std_limit = dynamic_std_limit_min
+        else:
+            recent_std = np.mean(std_history[-rolling_window:])
+            dynamic_std_limit = max(recent_std * 1.25, dynamic_std_limit_min)
+
 
         predicted_cum = [predicted_price]
         future_hist = hist.copy()
         future_dates = test_dates[i+1:i+1+lookahead_days]
+
         for f_day in future_dates:
             f_day_data = df[df['date'] == f_day]
             if len(f_day_data) < 24:
@@ -1554,7 +1613,8 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
             f_price = actual_today_eod * np.exp(f_pred / 100)
             predicted_cum.append(f_price)
 
-        predicted_cum_delta = predicted_cum[-1] - actual_today_eod
+        # predicted_cum_delta = predicted_cum[-1] - actual_today_eod
+        predicted_cum_delta = predicted_cum[-1] - actual_prev_eod
 
         # Dynamic thresholds
         buy_threshold = delta_mean * 0.005
@@ -1572,6 +1632,7 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
         release_fraction = 0.5  # Release 50% of locked HODL when conditions are met
 
         for trade in active_trades:
+
             if trade['sold']:
                 continue
 
@@ -1587,7 +1648,7 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
 
                     trade['sold'] = True  # OR flag as 'partially_unlocked'
 
-                    print(f"UNLOCKED HODL → +{unlock_qty:.4f} BTC back to tradable pool @ ${actual_today_eod:.2f}")
+                    print(f"\nUNLOCKED HODL! -> +{unlock_qty:.4f} BTC back to tradable pool @ ${actual_today_eod:.2f}")
 
                     unlock_log.append({
                         'date': str(curr_day),
@@ -1596,7 +1657,6 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
                         'price': actual_today_eod,
                         'held_days': days_held
                     })
-
 
                 if actual_today_eod > trade['buy_price']:
                     sell_qty = trade['buy_qty'] * 0.5
@@ -1682,8 +1742,11 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     plt.close('all')
 
     # Plot portfolio value over time
+    plot_dates = pd.to_datetime([t['date'] for t in trade_log])
+    portfolio_vals = [t['portfolio_value'] for t in trade_log]  # Always in sync
+
     plt.figure(figsize=(12, 6))
-    plt.plot(pd.to_datetime([t['date'] for t in trade_log]), portfolio_values, label="Portfolio Value", color='blue')
+    plt.plot(plot_dates, portfolio_vals, label="Portfolio Value", color='blue')
     plt.title("Portfolio Value Over Time")
     plt.xlabel("Date")
     plt.ylabel("Portfolio Value (USD)")
@@ -1704,6 +1767,8 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
 
 
 def main():
+    set_random_seed(42)
+
     # Load best Optuna params (optional if not using optimized)
     # try:
     #     best_params = load_best_params()
@@ -1721,7 +1786,7 @@ def main():
     # analyze_trade_wins(trade_log)
 
     # run_multi_step_test(load_if_exists=False)
-    set_random_seed(42)
+    
     # run_rolling_forecasts("2024-01-01", last_n_days=1)
     # run_eod_forecasts("2024-01-01", last_n_days=10)
 
@@ -1734,13 +1799,13 @@ def main():
     # Run the test loop
     # test_results = test_lookback_windows_for_eod(df)
 
-    # Step 2: Run test for 6–7 day windows
+    # Run test for 6–7 day windows
     # results_df = test_extended_lookbacks(df)
 
     # print("\nTraining hybrid LSTM model with RSI, BB, Volume...")
     # model, x_scaler, y_scaler, history = train_hybrid_model(df, lookback=120)
 
-    # # Plot training loss (optional)
+    # # Plot training loss
     # plt.figure(figsize=(8, 4))
     # plt.plot(history.history['loss'], label='Train Loss')
     # if 'val_loss' in history.history:
