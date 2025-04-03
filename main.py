@@ -1,5 +1,3 @@
-# this one did better, but never sold
-
 from datetime import datetime, timedelta, timezone
 import random
 import time
@@ -793,7 +791,7 @@ def run_multi_step_test1(start_date="2024-01-01", steps_ahead = 24):
     future_times = [last_timestamp + timedelta(hours=i + 1) for i in range(steps_ahead)]
 
     # Get actual prices for comparison
-    actual_prices = test_df['close'].iloc[-steps_ahead:].values  # Last `steps_ahead` actual prices
+    actual_prices = test_df['close'].iloc[-steps_ahead:].values  # Last steps_ahead actual prices
 
     # Calculate MAE and RMSE
     mae = mean_absolute_error(actual_prices, predictions)
@@ -1507,12 +1505,8 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
         print(f"[MODEL] Saved to {model_path}")
 
     cash, btc_available, btc_locked_hodl = initial_cash, 0.0, 0.0
-    vault_balance = 0.0  # 🏦 Locked away profits
-    harvested_profit_log = []  # Log of all harvested profits
     active_trades = []
     trade_log, portfolio_values = [], []
-
-
     last_buy_date = None
     std_history = []
     rolling_window = 5
@@ -1547,7 +1541,6 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
         predicted_cum = [predicted_price]
         future_hist = hist.copy()
         future_dates = test_dates[i+1:i+1+lookahead_days]
-
         for f_day in future_dates:
             f_day_data = df[df['date'] == f_day]
             if len(f_day_data) < 24:
@@ -1589,26 +1582,12 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
                 unlock_qty = trade['buy_qty'] * release_fraction
 
                 if btc_locked_hodl >= unlock_qty:
-                    # Calculate profit from unlocked BTC portion
-                    entry_price = trade['buy_price']
-                    profit = (actual_today_eod - entry_price) * unlock_qty
-                    if profit > 0:
-                        vault_balance += profit  # Lock the profit away
-
-                    # Execute partial sell of locked BTC
                     btc_locked_hodl -= unlock_qty
-                    trade['sold'] = True  # optional: flag as partial
+                    btc_available += unlock_qty
 
-                    harvested_profit_log.append({
-                        'date': str(curr_day),
-                        'btc_sold': unlock_qty,
-                        'price': actual_today_eod,
-                        'profit': profit,
-                        'vault_balance': vault_balance
-                    })
+                    trade['sold'] = True  # OR flag as 'partially_unlocked'
 
-                    print(f"🔓 UNLOCKED HODL → +{unlock_qty:.4f} BTC sold @ ${actual_today_eod:.2f} | Profit: ${profit:.2f} → Vault: ${vault_balance:.2f}")
-
+                    print(f"🔓 UNLOCKED HODL → +{unlock_qty:.4f} BTC back to tradable pool @ ${actual_today_eod:.2f}")
 
                     unlock_log.append({
                         'date': str(curr_day),
@@ -1628,7 +1607,6 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
                         decision = "PARTIAL SELL"
 
         if std_pred <= dynamic_std_limit and can_trade:
-            available_cash = cash - vault_balance
             if predicted_cum_delta >= buy_threshold and cash >= actual_today_eod * qty:
                 btc_available += qty * 0.5
                 btc_locked_hodl += qty * 0.5
@@ -1676,15 +1654,9 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     print("\nSimulation Complete")
     print(f"Final Portfolio Value: ${portfolio_values[-1]:,.2f}")
     print(f"Total Trades: {sum(1 for t in trade_log if t['decision'] != 'HOLD')}")
-    print(f"Total Vaulted Profit: ${vault_balance:,.2f} (Locked, not reinvested)")
-
 
     pd.DataFrame(trade_log).to_csv('trade_log.csv', index=False)
     print("Trade log saved to trade_log.csv")
-
-    pd.DataFrame(harvested_profit_log).to_csv("harvested_profits.csv", index=False)
-    print("Harvested profit log saved to harvested_profits.csv")
-
 
     # Plot actual vs predicted EOD prices
     plt.figure(figsize=(12, 6))
@@ -1754,7 +1726,7 @@ def main():
     # run_eod_forecasts("2024-01-01", last_n_days=10)
 
     # Load historical BTC data
-    df = crypto_bars('BTC/USD', "2023-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
+    df = crypto_bars('BTC/USD', "2022-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
     df = df.reset_index()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
@@ -1813,4 +1785,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
