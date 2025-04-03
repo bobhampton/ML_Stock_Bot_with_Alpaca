@@ -1454,6 +1454,7 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     df = add_technical_indicators(df)
     df['date'] = df['timestamp'].dt.date
 
+    # Feature engineering
     df['log_return'] = np.log(df['close'].shift(-1) / df['close'])
     df['target'] = df['log_return'] * 100
 
@@ -1482,11 +1483,14 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
 
     test_df = df[df['date'].isin(test_dates)]
 
+    # Volatility stats
     train_eod = train_df.groupby('date')['close'].last()
     daily_deltas = train_eod.diff().dropna()
     delta_mean = daily_deltas.abs().mean()
     delta_std = daily_deltas.abs().std()
+    print(f"Estimated EOD Delta Mean: {delta_mean:.2f} | Std Dev: {delta_std:.2f}")
 
+    # Save/load model
     model_name = f"hybrid_{train_dates[0]}_{train_dates[-1]}.keras"
     model_path = os.path.join(model_dir, model_name)
     X_train, y_train, x_scaler, y_scaler = prepare_eod_training_data_hybrid(train_df, lookback)
@@ -1500,13 +1504,15 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
         model = build_hybrid_LSTM_model(input_shape)
         model.fit(X_train, y_train, epochs=100, batch_size=32, validation_split=0.1, verbose=0)
         model.save(model_path)
+        print(f"[MODEL] Saved to {model_path}")
 
     cash, btc_available, btc_locked_hodl = initial_cash, 0.0, 0.0
-    vault_balance = 0.0
-    harvested_profit_log = []
-
+    vault_balance = 0.0  # 🏦 Locked away profits
+    harvested_profit_log = []  # Log of all harvested profits
     active_trades = []
     trade_log, portfolio_values = [], []
+
+
     last_buy_date = None
     std_history = []
     rolling_window = 5
@@ -1541,6 +1547,7 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
         predicted_cum = [predicted_price]
         future_hist = hist.copy()
         future_dates = test_dates[i+1:i+1+lookahead_days]
+
         for f_day in future_dates:
             f_day_data = df[df['date'] == f_day]
             if len(f_day_data) < 24:
@@ -1556,15 +1563,20 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
 
         predicted_cum_delta = predicted_cum[-1] - actual_today_eod
 
+        # Dynamic thresholds
         buy_threshold = delta_mean * 0.005
         sell_threshold = -delta_mean * 0.5
 
         decision = "HOLD"
         can_trade = not last_buy_date or (curr_day - last_buy_date).days >= cooldown_days
 
-        unlock_days = 2
-        min_profit_pct = 0.02
-        release_fraction = 0.5
+        print(f"BUY CHECK: Δ={predicted_cum_delta:.2f} vs Threshold={buy_threshold:.2f}")
+        print(f"Cash: ${cash:,.2f}, Required: ${actual_today_eod * qty:,.2f}")
+        print(f"Can Trade: {can_trade}")
+
+        unlock_days = 2  # 🔓 Min holding period
+        min_profit_pct = 0.02  # At least 2% profit
+        release_fraction = 0.5  # Release 50% of locked HODL when conditions are met
 
         for trade in active_trades:
             if trade['sold']:
@@ -1577,13 +1589,15 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
                 unlock_qty = trade['buy_qty'] * release_fraction
 
                 if btc_locked_hodl >= unlock_qty:
+                    # Calculate profit from unlocked BTC portion
                     entry_price = trade['buy_price']
                     profit = (actual_today_eod - entry_price) * unlock_qty
                     if profit > 0:
-                        vault_balance += profit
+                        vault_balance += profit  # Lock the profit away
 
+                    # Execute partial sell of locked BTC
                     btc_locked_hodl -= unlock_qty
-                    trade['sold'] = True
+                    trade['sold'] = True  # optional: flag as partial
 
                     harvested_profit_log.append({
                         'date': str(curr_day),
@@ -1595,9 +1609,27 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
 
                     print(f"🔓 UNLOCKED HODL → +{unlock_qty:.4f} BTC sold @ ${actual_today_eod:.2f} | Profit: ${profit:.2f} → Vault: ${vault_balance:.2f}")
 
-        available_cash = cash - vault_balance
+
+                    unlock_log.append({
+                        'date': str(curr_day),
+                        'action': 'UNLOCK',
+                        'unlocked_qty': unlock_qty,
+                        'price': actual_today_eod,
+                        'held_days': days_held
+                    })
+
+
+                if actual_today_eod > trade['buy_price']:
+                    sell_qty = trade['buy_qty'] * 0.5
+                    if btc_available >= sell_qty:
+                        btc_available -= sell_qty
+                        cash += actual_today_eod * sell_qty
+                        trade['sold'] = True
+                        decision = "PARTIAL SELL"
+
         if std_pred <= dynamic_std_limit and can_trade:
-            if predicted_cum_delta >= buy_threshold and available_cash >= actual_today_eod * qty:
+            available_cash = cash - vault_balance
+            if predicted_cum_delta >= buy_threshold and cash >= actual_today_eod * qty:
                 btc_available += qty * 0.5
                 btc_locked_hodl += qty * 0.5
                 cash -= actual_today_eod * qty
@@ -1632,16 +1664,29 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
 
         portfolio_values.append(total_value)
 
+        print(f"\nDate: {curr_day}")
+        print(f"  Prediction: {predicted_price:.2f} ± {std_pred:.2f}")
+        print(f"  Previous EOD: {actual_prev_eod:.2f}")
+        print(f"  Cumulative Predicted Δ (next {lookahead_days} days): {predicted_cum_delta:.2f}")
+        print(f"  Decision: {decision}")
+        print(f"  Cash: ${cash:,.2f} | BTC Available: {btc_available:.4f} | HODL BTC: {btc_locked_hodl:.4f} | Portfolio Value: ${total_value:,.2f}")
+        if decision == "HOLD" and std_pred > dynamic_std_limit:
+            print(f"  Skipping trade: std {std_pred:.2f} > limit {dynamic_std_limit:.2f}")
+
     print("\nSimulation Complete")
     print(f"Final Portfolio Value: ${portfolio_values[-1]:,.2f}")
     print(f"Total Trades: {sum(1 for t in trade_log if t['decision'] != 'HOLD')}")
     print(f"Total Vaulted Profit: ${vault_balance:,.2f} (Locked, not reinvested)")
 
+
     pd.DataFrame(trade_log).to_csv('trade_log.csv', index=False)
-    pd.DataFrame(harvested_profit_log).to_csv('harvested_profits.csv', index=False)
     print("Trade log saved to trade_log.csv")
+
+    pd.DataFrame(harvested_profit_log).to_csv("harvested_profits.csv", index=False)
     print("Harvested profit log saved to harvested_profits.csv")
 
+
+    # Plot actual vs predicted EOD prices
     plt.figure(figsize=(12, 6))
     plt.plot(pd.to_datetime([t['date'] for t in trade_log]), [t['actual_eod'] for t in trade_log], label="Actual EOD", color='red', marker='o')
     plt.plot(pd.to_datetime([t['date'] for t in trade_log]), [t['predicted_eod'] for t in trade_log], label="Predicted EOD", color='blue', marker='o')
@@ -1664,6 +1709,7 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     plt.pause(3)
     plt.close('all')
 
+    # Plot portfolio value over time
     plt.figure(figsize=(12, 6))
     plt.plot(pd.to_datetime([t['date'] for t in trade_log]), portfolio_values, label="Portfolio Value", color='blue')
     plt.title("Portfolio Value Over Time")
@@ -1678,7 +1724,6 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     plt.close('all')
 
     return trade_log
-
 
 
 
