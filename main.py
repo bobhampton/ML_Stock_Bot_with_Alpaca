@@ -1655,6 +1655,7 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
             days_held = (curr_day - trade['buy_date']).days
             profit_target_price = trade['buy_price'] * (1 + min_profit_pct)
 
+            # This causes the final value of the portfolio to go down from 12689.75 to 11283.21
             # if days_held >= unlock_days and actual_today_eod >= profit_target_price:
             #     unlock_qty = trade['buy_qty'] * release_fraction
 
@@ -1681,7 +1682,10 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
             #             cash += actual_today_eod * sell_qty
             #             trade['sold'] = True
             #             decision = "PARTIAL SELL"
+
+
         # Emergency Liquidity Unlock Logic
+        # without this available cash stops at 444.10 and no trades can be made, but portfolio value is 12839.80
         if cash < low_cash_threshold and btc_available > 0:
             btc_to_sell = min(btc_available, (min_cash_restore_target - cash) / actual_today_eod)
             if btc_to_sell > 1e-6:
@@ -1823,14 +1827,18 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
 
     return trade_log
 
-
-
-
-
-
-
 def main():
     set_random_seed(42)
+
+    # Load historical BTC data
+    # df = crypto_bars('BTC/USD', "2022-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
+    df = crypto_bars('BTC/USD', "2022-01-01", '2025-04-04', None, TimeFrame.Hour)
+    df = df.reset_index()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
+
+    simulate_eod_trading_on_holdout(df)
+
 
     # Load best Optuna params (optional if not using optimized)
     # try:
@@ -1852,12 +1860,6 @@ def main():
     
     # run_rolling_forecasts("2024-01-01", last_n_days=1)
     # run_eod_forecasts("2024-01-01", last_n_days=10)
-
-    # Load historical BTC data
-    df = crypto_bars('BTC/USD', "2022-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
-    df = df.reset_index()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
 
     # Run the test loop
     # test_results = test_lookback_windows_for_eod(df)
@@ -1906,10 +1908,6 @@ def main():
     #     initial_cash=10000,
     #     qty=0.001
     # )
-
-    simulate_eod_trading_on_holdout(df)
-
-
 
 if __name__ == "__main__":
     main()
