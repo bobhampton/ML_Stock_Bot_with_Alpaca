@@ -722,13 +722,30 @@ def analyze_trade_wins(trade_log, csv_path="trade_performance_summary.csv", plot
     plt.figure(figsize=(10, 5))
     plt.plot(pnl_df['date'], pnl_df['cumulative_pnl'], marker='o', color='blue')
     plt.title("Cumulative Profit Over Time")
-    plt.xlabel("Time")
+    plt.xlabel("date")
     plt.ylabel("Cumulative P&L ($)")
     plt.grid(True)
     plt.tight_layout()
     cum_path = os.path.join(plot_dir, "cumulative_profit.png")
     plt.savefig(cum_path)
     print(f"[✓] Cumulative profit chart saved to: {cum_path}")
+    plt.close()
+
+    # Cumulative Loss Only Chart
+    pnl_df['loss_only'] = pnl_df['pnl'].apply(lambda x: x if x < 0 else 0)
+    pnl_df['cumulative_loss'] = pnl_df['loss_only'].cumsum()
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(pnl_df['date'], pnl_df['cumulative_loss'], marker='o', color='red')
+    plt.title("Cumulative Loss Over Time")
+    plt.xlabel("date")
+    plt.ylabel("Cumulative Loss ($)")
+    plt.grid(True)
+    plt.tight_layout()
+
+    loss_path = os.path.join(plot_dir, "cumulative_loss.png")
+    plt.savefig(loss_path)
+    print(f"[✓] Cumulative loss chart saved to: {loss_path}")
     plt.close()
 
     return stats
@@ -1854,11 +1871,12 @@ def main():
     # Load historical BTC data
     df = crypto_bars(
         'BTC/USD',
-        "2022-01-01",
+        "2021-01-01",
         '2025-04-04',
         None,
         TimeFrame.Hour
     )
+    print(df.head())
 
     df = df.reset_index()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
