@@ -8,6 +8,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import run_test
 import optuna
+from statistics import mean
 import ta
 import tensorflow as tf
 import json
@@ -56,9 +57,6 @@ def set_random_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
-    # Optional: Force single-thread mode for more determinism
-    # tf.config.threading.set_intra_op_parallelism_threads(1)
-    # tf.config.threading.set_inter_op_parallelism_threads(1)
 
 def account_details():
     # Initialize the TradingClient.
@@ -212,7 +210,6 @@ def train_model_LSTM(X, y, input_shape=(120, 1), validation_split=0.1):
 
     return model, history
 
-
 # Function to test and visualize the LSTM model's loss and predicted vs actual prices and
 def run_LSTM_test():
     # Get historical BTC/USD bars
@@ -269,7 +266,7 @@ def run_LSTM_test():
     predicted = scaler.inverse_transform(predicted_scaled)
     actual = scaler.inverse_transform(y_test.reshape(-1, 1))
 
-    timestamps = test_df['timestamp'].iloc[60:]  # align with X_test
+    timestamps = test_df['timestamp'].iloc[-len(predicted):] # align with X_test
 
     # Eval metrics
     mae = mean_absolute_error(actual, predicted)
@@ -639,69 +636,105 @@ def load_trade_log(path='trade_log.csv'):
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     return df.to_dict(orient='records')
 
-def analyze_trade_wins(trade_log):
+def analyze_trade_wins(trade_log, csv_path="trade_performance_summary.csv", plot_dir="analytics"):
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    from statistics import mean
+    from datetime import datetime
+    import os
+
+    os.makedirs(plot_dir, exist_ok=True)
+
     if not trade_log:
         print("No trades to analyze.")
-        return
-
-    from statistics import mean, median
+        return {}
 
     trades = pd.DataFrame(trade_log)
-    trades['timestamp'] = pd.to_datetime(trades['timestamp'])
-    trades = trades.sort_values('timestamp')
+    trades['date'] = pd.to_datetime(trades['date'])
+    trades = trades.sort_values('date')
 
-    positions = []
+    # Track open and closed trades
     holding = 0
     entry_price = 0
-    wins = []
-    losses = []
+    positions = []
+    pnl_list = []
 
     for _, row in trades.iterrows():
-        if row['action'] == 'BUY':
-            holding += row['btc']
-            entry_price += row['price'] * row['btc']
-        elif row['action'] == 'SELL' and holding > 0:
+        if row['decision'] == 'BUY':
+            holding += 1
+            entry_price += row['actual_eod']
+        elif row['decision'] == 'SELL' and holding > 0:
             avg_entry = entry_price / holding
-            pnl = (row['price'] - avg_entry) * row['btc']
-            positions.append({
-                'timestamp': row['timestamp'],
-                'entry_price': avg_entry,
-                'exit_price': row['price'],
-                'btc': row['btc'],
+            pnl = row['actual_eod'] - avg_entry
+            pnl_list.append({
+                'date': row['date'],
                 'pnl': pnl
             })
-            if pnl >= 0:
-                wins.append(pnl)
-            else:
-                losses.append(pnl)
-            # Reduce holding + entry_price for multi-partial trades
-            holding -= row['btc']
-            entry_price -= avg_entry * row['btc']
+            positions.append(pnl)
+            holding -= 1
+            entry_price -= avg_entry
 
-    if not positions:
+    if not pnl_list:
         print("No closed positions (BUY followed by SELL).")
-        return
+        return {}
 
-    # Summary Stats
-    total = len(positions)
-    win_count = len(wins)
-    loss_count = len(losses)
-    win_rate = win_count / total * 100
-    avg_win = mean(wins) if wins else 0
-    avg_loss = mean(losses) if losses else 0
-    best = max(wins) if wins else 0
-    worst = min(losses) if losses else 0
-    net_profit = sum(wins) + sum(losses)
+    pnl_df = pd.DataFrame(pnl_list)
+    pnl_df['cumulative_pnl'] = pnl_df['pnl'].cumsum()
 
-    print(f"\nTRADE WIN ANALYSIS:")
-    print(f"Closed Trades: {total}")
-    print(f"Wins: {win_count} | Losses: {loss_count}")
-    print(f"Win Rate: {win_rate:.2f}%")
-    print(f"Average Win: ${avg_win:.2f}")
-    print(f"Average Loss: ${avg_loss:.2f}")
-    print(f"Best Trade: +${best:.2f}")
-    print(f"Worst Trade: ${worst:.2f}")
-    print(f"Net Profit (Closed Trades): ${net_profit:.2f}")
+    wins = pnl_df[pnl_df['pnl'] > 0]['pnl'].tolist()
+    losses = pnl_df[pnl_df['pnl'] <= 0]['pnl'].tolist()
+
+    stats = {
+        'Total Trades': len(pnl_df),
+        'Win Rate (%)': round(len(wins) / len(pnl_df) * 100, 2),
+        'Avg Win': round(mean(wins), 2) if wins else 0.0,
+        'Avg Loss': round(mean(losses), 2) if losses else 0.0,
+        'Best Trade': round(max(wins), 2) if wins else 0.0,
+        'Worst Trade': round(min(losses), 2) if losses else 0.0,
+        'Net Profit': round(sum(pnl_df['pnl']), 2)
+    }
+
+    print("\n=== TRADE PERFORMANCE SUMMARY ===")
+    for k, v in stats.items():
+        print(f"{k}: {v}")
+
+    # ave CSV
+    pd.DataFrame([stats]).to_csv(csv_path, index=False)
+    print(f"[✓] Performance summary saved to: {csv_path}")
+
+    # P&L Histogram
+    plt.figure(figsize=(10, 5))
+    plt.hist(wins, bins=15, alpha=0.6, label='Wins', color='green')
+    plt.hist(losses, bins=15, alpha=0.6, label='Losses', color='red')
+    plt.axvline(0, color='black', linestyle='--')
+    plt.title("Distribution of Trade P&L")
+    plt.xlabel("Profit/Loss ($)")
+    plt.ylabel("Frequency")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    hist_path = os.path.join(plot_dir, "pnl_histogram.png")
+    plt.savefig(hist_path)
+    print(f"[✓] Histogram saved to: {hist_path}")
+    plt.close()
+
+    # Cumulative P&L Chart
+    plt.figure(figsize=(10, 5))
+    plt.plot(pnl_df['date'], pnl_df['cumulative_pnl'], marker='o', color='blue')
+    plt.title("Cumulative Profit Over Time")
+    plt.xlabel("Time")
+    plt.ylabel("Cumulative P&L ($)")
+    plt.grid(True)
+    plt.tight_layout()
+    cum_path = os.path.join(plot_dir, "cumulative_profit.png")
+    plt.savefig(cum_path)
+    print(f"[✓] Cumulative profit chart saved to: {cum_path}")
+    plt.close()
+
+    return stats
+
+
+
 
 # Predict multiple steps ahead without using real data
 def predict_multi_step(model, scaler, initial_sequence, steps_ahead):
@@ -1068,9 +1101,6 @@ def run_rolling_forecasts(start_date = '2024-01-01', last_n_days=3, steps_ahead=
     print(f"Logs saved to: {log_path}")
     print(log_df)
 
-
-
-
 def train_hybrid_model(df, lookback=120):
     X, y, x_scaler, y_scaler = prepare_eod_training_data_hybrid(df, lookback=lookback)
     input_shape = (X.shape[1], X.shape[2])
@@ -1080,17 +1110,6 @@ def train_hybrid_model(df, lookback=120):
     history = model.fit(X, y, epochs=100, batch_size=32, validation_split=0.1, callbacks=[early_stop], verbose=1)
 
     return model, x_scaler, y_scaler, history
-
-# def predict_eod_with_uncertainty(model, scaler, input_sequence, n_simulations=30):
-#     preds = []
-#     for _ in range(n_simulations):
-#         input_seq_reshaped = input_sequence.reshape(1, 60, 1)
-#         predicted_scaled = model(input_seq_reshaped, training=True)
-#         predicted = scaler.inverse_transform(predicted_scaled)[0][0]
-#         preds.append(predicted)
-#     return np.mean(preds), np.std(preds)
-
-
 
 def run_eod_forecasts(start_date='2024-01-01', last_n_days=5, model_dir='models', log_path='eod_prediction_logs.csv'):
     os.makedirs(model_dir, exist_ok=True)
@@ -1201,7 +1220,7 @@ def test_lookback_windows_for_eod(
     lookback_windows=[60, 72, 96, 120], 
     epochs=50, 
     batch_size=32,
-    verbose=1
+    verbose=0
 ):
     results = []
 
@@ -1336,32 +1355,28 @@ def evaluate_hybrid_model_on_holdout(df, lookback=120):
 
     return mae, rmse
 
-
-
-
-# This runs 30 separate stochastic forward passes per day
-# def predict_eod_with_uncertainty(model, scaler, input_sequence, n_simulations=30):
-#     preds = []
-#     input_seq_reshaped = input_sequence.reshape(1, *input_sequence.shape)
-#     for _ in range(n_simulations):
-#         predicted_scaled = model(input_seq_reshaped, training=True)
-#         predicted = scaler.inverse_transform(predicted_scaled)[0][0]
-#         preds.append(predicted)
-#     return np.mean(preds), np.std(preds)
-
-# Trying out batch predict instead of looping like above
-# This one is much faster, but slightly less accurate
-def predict_eod_with_uncertainty(model, scaler, input_sequence, n_simulations=30):
-    input_seq_reshaped = input_sequence.reshape(1, *input_sequence.shape)
-    input_seq_batch = np.repeat(input_seq_reshaped, n_simulations, axis=0)  # shape: (30, lookback, features)
-    
-    predictions_scaled = model(input_seq_batch, training=True).numpy()
-    predictions = scaler.inverse_transform(predictions_scaled)
-    
-    mean_pred = predictions.mean()
-    std_pred = predictions.std()
-    
-    return mean_pred, std_pred
+# Fast = batch prediction
+# Slow = sequential prediction
+def predict_eod_with_uncertainty(model, scaler, input_sequence, n_simulations=30, mode = 'fast'):
+    if mode == 'fast':
+        input_seq_reshaped = input_sequence.reshape(1, *input_sequence.shape)
+        input_seq_batch = np.repeat(input_seq_reshaped, n_simulations, axis=0)  # shape: (30, lookback, features)
+        
+        predictions_scaled = model(input_seq_batch, training=True).numpy()
+        predictions = scaler.inverse_transform(predictions_scaled)
+        
+        mean_pred = predictions.mean()
+        std_pred = predictions.std()
+        
+        return mean_pred, std_pred
+    elif mode == 'slow':
+        preds = []
+        input_seq_reshaped = input_sequence.reshape(1, *input_sequence.shape)
+        for _ in range(n_simulations):
+            predicted_scaled = model(input_seq_reshaped, training=True)
+            predicted = scaler.inverse_transform(predicted_scaled)[0][0]
+            preds.append(predicted)
+        return np.mean(preds), np.std(preds)
 
 def build_hybrid_LSTM_model(input_shape, units=64, dropout=0.2):
     model = Sequential()
@@ -1378,7 +1393,6 @@ def save_model(model, path='btc_lstm_model.keras'):
     model.save(path)
 
 def load_model_from_file(path='btc_lstm_model.keras'):
-    
     return load_model(path)
 
 def prepare_eod_training_data_hybrid(df, lookback=120):
@@ -1825,89 +1839,32 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
     plt.pause(3)
     plt.close('all')
 
+    # Analyze trade effectiveness after simulation
+    results = analyze_trade_wins(trade_log)
+
+
     return trade_log
 
+
+
 def main():
+
     set_random_seed(42)
 
     # Load historical BTC data
-    # df = crypto_bars('BTC/USD', "2022-01-01", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None, TimeFrame.Hour)
-    df = crypto_bars('BTC/USD', "2022-01-01", '2025-04-04', None, TimeFrame.Hour)
+    df = crypto_bars(
+        'BTC/USD',
+        "2022-01-01",
+        '2025-04-04',
+        None,
+        TimeFrame.Hour
+    )
+
     df = df.reset_index()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['close'] = df[[col for col in df.columns if 'close' in col.lower()]].squeeze()
 
     simulate_eod_trading_on_holdout(df)
-
-
-    # Load best Optuna params (optional if not using optimized)
-    # try:
-    #     best_params = load_best_params()
-    # except FileNotFoundError:
-    #     best_params = {
-    #         "units": 50,
-    #         "dropout": 0.2,
-    #         "batch_size": 32,
-    #         "epochs": 100
-    #     }
-
-    # run_backtest1(best_params=best_params)
-
-    # trade_log = load_trade_log('trade_log.csv')
-    # analyze_trade_wins(trade_log)
-
-    # run_multi_step_test(load_if_exists=False)
-    
-    # run_rolling_forecasts("2024-01-01", last_n_days=1)
-    # run_eod_forecasts("2024-01-01", last_n_days=10)
-
-    # Run the test loop
-    # test_results = test_lookback_windows_for_eod(df)
-
-    # Run test for 6–7 day windows
-    # results_df = test_extended_lookbacks(df)
-
-    # print("\nTraining hybrid LSTM model with RSI, BB, Volume...")
-    # model, x_scaler, y_scaler, history = train_hybrid_model(df, lookback=120)
-
-    # # Plot training loss
-    # plt.figure(figsize=(8, 4))
-    # plt.plot(history.history['loss'], label='Train Loss')
-    # if 'val_loss' in history.history:
-    #     plt.plot(history.history['val_loss'], label='Val Loss')
-    # plt.title("Training Loss (Hybrid LSTM)")
-    # plt.xlabel("Epochs")
-    # plt.ylabel("MSE Loss")
-    # plt.grid(True)
-    # plt.legend()
-    # plt.tight_layout()
-    # plt.savefig("hybrid_training_loss.png")
-    # plt.close()
-
-    # # Save the trained model
-    # save_model(model, path="hybrid_eod_model.keras")
-    # print("Model saved as hybrid_eod_model.keras")
-
-    # # (Optional) Predict next EOD using last sequence
-    # last_seq_df = add_technical_indicators(df).dropna().tail(120)
-    # input_seq = last_seq_df[['close', 'rsi', 'bb_width', 'volume_scaled']].values
-    # input_seq_scaled = x_scaler.transform(input_seq).reshape(1, 120, 4)
-    # predicted_eod_scaled = model.predict(input_seq_scaled)
-    # predicted_eod = y_scaler.inverse_transform(predicted_eod_scaled)[0][0]
-
-
-    # print(f"\nPredicted BTC EOD Price: ${predicted_eod:,.2f}")
-
-    # evaluate_hybrid_model_on_holdout(df, lookback=120)
-
-    # simulate_eod_trading_on_holdout(
-    #     df,
-    #     lookback=120,
-    #     threshold=500,
-    #     std_limit=6000,
-    #     initial_cash=10000,
-    #     qty=0.001
-    # )
 
 if __name__ == "__main__":
     main()
