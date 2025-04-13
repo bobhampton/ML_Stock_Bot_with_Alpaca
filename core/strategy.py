@@ -172,51 +172,11 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
         min_profit_pct = 0.02
         release_fraction = 0.5
 
-        # === Enhanced Exit Logic v2.0 ===
-
         for trade in active_trades:
             if trade['sold']:
                 continue
-
             days_held = (curr_day - trade['buy_date']).days
-            current_profit_pct = (actual_today_eod - trade['buy_price']) / trade['buy_price']
-
-            # Track max price since entry for trailing stop
-            if 'max_price' not in trade or actual_today_eod > trade['max_price']:
-                trade['max_price'] = actual_today_eod
-
-            trailing_stop_pct = 0.015
-            profit_target_pct = 0.03
-            max_hold_days = 7
-
-            exit_reason = None
-
-            # Profit Target Hit
-            if current_profit_pct >= profit_target_pct:
-                exit_reason = "Target Profit Reached"
-
-            # Trailing Stop Triggered
-            elif actual_today_eod < trade['max_price'] * (1 - trailing_stop_pct):
-                exit_reason = "Trailing Stop Triggered"
-
-            # Confidence Collapse (model uncertainty too high)
-            elif std_pred > dynamic_std_limit * 1.25:
-                exit_reason = "Uncertainty Spike"
-
-            # Time-based Exit
-            elif days_held > max_hold_days and current_profit_pct > 0:
-                exit_reason = "Max Hold Reached"
-
-            if exit_reason:
-                sell_qty = trade['buy_qty']
-                if btc_available >= sell_qty:
-                    btc_available -= sell_qty
-                    cash += actual_today_eod * sell_qty
-                    trade['sold'] = True
-                    decision = f"SELL ({exit_reason})"
-
-                    print(f"Exit: {exit_reason} | Sold {sell_qty:.4f} BTC @ ${actual_today_eod:,.2f}")
-
+            profit_target_price = trade['buy_price'] * (1 + min_profit_pct)
 
         if cash < low_cash_threshold and btc_available > 0:
             btc_to_sell = min(btc_available, (min_cash_restore_target - cash) / actual_today_eod)
