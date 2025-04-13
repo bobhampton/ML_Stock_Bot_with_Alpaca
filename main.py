@@ -12,7 +12,7 @@ def main():
     df = crypto_bars(
         symbol='BTC/USD',
         start_date="2021-01-01",
-        end_date="2025-04-04",
+        end_date="2025-04-13",
         limit=None,
         timeframe=TimeFrame.Hour
     )

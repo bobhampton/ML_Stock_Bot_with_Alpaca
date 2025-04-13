@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
-from keras.models import Sequential, load_model
-from keras.layers import Input, LSTM, Dropout, Dense
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import Input, LSTM, Dropout, Dense
 from sklearn.preprocessing import StandardScaler
 
 def build_hybrid_LSTM_model(input_shape, units=64, dropout=0.2):
