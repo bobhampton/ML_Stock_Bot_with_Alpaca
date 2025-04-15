@@ -110,7 +110,7 @@ def simulate_eod_trading_on_holdout(df, lookback=120, initial_cash=10000, qty=0.
 
         input_seq = hist[feature_cols].values
         input_scaled = x_scaler.transform(input_seq).reshape(1, lookback, len(feature_cols))
-        mean_pred, std_pred = predict_eod_with_uncertainty(model, y_scaler, input_seq, n_simulations=30, mode='slow')
+        mean_pred, std_pred = predict_eod_with_uncertainty(model, y_scaler, input_seq, n_simulations=30, mode='fast')
 
         predicted_log_return = mean_pred / 100
         predicted_price = actual_prev_eod * np.exp(predicted_log_return)
