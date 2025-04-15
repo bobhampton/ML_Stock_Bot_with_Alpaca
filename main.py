@@ -11,5 +11,5 @@ def main():
     model=train_svm_model(X_train,y_train)
     predict_and_plot(model,X_test,y_test,btc)
 
-    if _name__=="_main_":
+    if __name__=="_main_":
         main()
