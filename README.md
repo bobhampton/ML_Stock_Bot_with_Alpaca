@@ -8,6 +8,8 @@ This repository is a group project for CPE-595 that leverages the Alpaca API to 
 - Preprocess data for machine learning
 - Train model to predict stock prices
 - Visualize actual vs predicted stock prices
+  <img width="1200" height="600" alt="eod_prediction" src="https://github.com/user-attachments/assets/ed4f38b3-f0a7-4262-a0b2-e67a715aa5d0" />
+
 
 ## License
 
